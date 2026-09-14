@@ -65,12 +65,9 @@ class UpdateService:
             if source_type == "github":
                 source = velopack.GithubSource(url, None, bool(self._config.get("prerelease", False)))
             else:
-                # Bound feed checks so an unreachable server cannot strand a worker forever.
-                try:
-                    http_options = velopack.HttpOptions([], 30000)
-                    source = velopack.HttpSource(url, http_options)
-                except (AttributeError, TypeError):
-                    source = url
+                # A plain HTTPS URL selects Velopack's static web source. This
+                # avoids GitHub's anonymous REST API (60 requests/hour/IP).
+                source = url
             manager = velopack.UpdateManager(source)
             current = manager.get_current_version()
             if current:

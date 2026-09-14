@@ -5,10 +5,10 @@ param(
     [string]$Version,
 
     [ValidateSet('http', 'github')]
-    [string]$Source = 'github',
+    [string]$Source = 'http',
 
     [ValidatePattern('^https://')]
-    [string]$FeedUrl = 'https://github.com/jmlinguito-ux/gdpt',
+    [string]$FeedUrl = 'https://github.com/jmlinguito-ux/gdpt/releases/latest/download',
 
     [string]$DataverseConfig = '',
 

@@ -113,6 +113,9 @@ cached locally so you don't sign in every launch.
    pre-fills the Settings screen on first installation while keeping the JSON
    out of source control. Values bundled into a distributed desktop installer
    must be treated as public configuration, never as passwords or client secrets.
+   The updater reads release files from GitHub's static
+   `releases/latest/download` endpoint rather than the anonymous GitHub REST API,
+   so update checks do not share the API's 60-requests-per-hour IP limit.
 6. Your Microsoft account must be a Dataverse user in that environment with read
    access to those tables (a role such as Basic User with read on the `cr63f_`
    tables).
