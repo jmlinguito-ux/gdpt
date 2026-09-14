@@ -108,6 +108,11 @@ cached locally so you don't sign in every launch.
    For source development, copy `dataverse_config.example.json` to
    `dataverse_config.json` and fill in the same values. The real configuration
    file is intentionally excluded from Git.
+   Official release installers receive the shared connection defaults from the
+   encrypted `DATAVERSE_CONFIG_B64` GitHub Actions repository secret. This
+   pre-fills the Settings screen on first installation while keeping the JSON
+   out of source control. Values bundled into a distributed desktop installer
+   must be treated as public configuration, never as passwords or client secrets.
 6. Your Microsoft account must be a Dataverse user in that environment with read
    access to those tables (a role such as Basic User with read on the `cr63f_`
    tables).

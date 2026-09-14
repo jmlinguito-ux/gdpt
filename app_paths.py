@@ -53,8 +53,6 @@ def _migrate_legacy_data(destination: str) -> None:
             if os.path.normcase(source) == os.path.normcase(destination):
                 continue
             candidates = [name]
-            if name == "dataverse_config.json":
-                candidates.append("dataverse_config.example.json")
             copied = False
             for candidate in candidates:
                 old_path = os.path.join(source, candidate)

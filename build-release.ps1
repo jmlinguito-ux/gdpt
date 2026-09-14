@@ -10,6 +10,8 @@ param(
     [ValidatePattern('^https://')]
     [string]$FeedUrl = 'https://github.com/jmlinguito-ux/gdpt',
 
+    [string]$DataverseConfig = '',
+
     [string]$ReleaseNotes = '',
     [string]$OutputDirectory = 'Releases'
 )
@@ -30,6 +32,10 @@ New-Item -ItemType Directory -Force -Path $generatedDirectory | Out-Null
 } | ConvertTo-Json | Set-Content -LiteralPath $generatedConfig -Encoding utf8
 
 $env:GDPT_UPDATE_CONFIG = $generatedConfig
+if ($DataverseConfig) {
+    $resolvedDataverseConfig = (Resolve-Path -LiteralPath $DataverseConfig).Path
+    $env:GDPT_DATAVERSE_CONFIG = $resolvedDataverseConfig
+}
 try {
     # Use the interpreter selected by the environment (including setup-python
     # on GitHub Actions). The Windows `py` launcher can resolve to a different
@@ -38,6 +44,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE." }
 } finally {
     Remove-Item Env:GDPT_UPDATE_CONFIG -ErrorAction SilentlyContinue
+    Remove-Item Env:GDPT_DATAVERSE_CONFIG -ErrorAction SilentlyContinue
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $packDirectory 'Ground-Data-Processing-Tool.exe'))) {

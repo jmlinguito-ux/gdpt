@@ -28,6 +28,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_VERSION: ${{ inputs.version }}
       RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
+      DATAVERSE_CONFIG_B64: ${{ secrets.DATAVERSE_CONFIG_B64 }}
 
     steps:
       - name: Check out source
@@ -102,10 +103,31 @@ jobs:
           }
           Set-Content -LiteralPath release-notes.md -Value $notes -Encoding utf8
 
+      - name: Prepare bundled Dataverse defaults
+        shell: pwsh
+        run: |
+          if (-not $env:DATAVERSE_CONFIG_B64) {
+            throw 'Repository secret DATAVERSE_CONFIG_B64 is not configured.'
+          }
+          $configDir = Join-Path $env:RUNNER_TEMP 'gdpt-release-config'
+          $configPath = Join-Path $configDir 'dataverse_config.json'
+          New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+          try {
+            $bytes = [Convert]::FromBase64String($env:DATAVERSE_CONFIG_B64)
+            [IO.File]::WriteAllBytes($configPath, $bytes)
+            $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+          } catch {
+            throw 'DATAVERSE_CONFIG_B64 is not valid base64-encoded JSON.'
+          }
+          foreach ($key in @('environment_url', 'tenant_id', 'client_id')) {
+            if (-not $config.$key) { throw "Bundled Dataverse config is missing '$key'." }
+          }
+          "DATAVERSE_CONFIG_PATH=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build installer and update packages
         shell: pwsh
         run: |
-          .\build-release.ps1 -Version $env:RELEASE_VERSION -ReleaseNotes .\release-notes.md
+          .\build-release.ps1 -Version $env:RELEASE_VERSION -DataverseConfig $env:DATAVERSE_CONFIG_PATH -ReleaseNotes .\release-notes.md
 
       - name: Publish GitHub release
         shell: pwsh

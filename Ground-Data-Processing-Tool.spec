@@ -3,7 +3,12 @@ import os
 from PyInstaller.utils.hooks import collect_all
 
 update_config = os.environ.get('GDPT_UPDATE_CONFIG', 'update_config.json')
+dataverse_config = os.environ.get('GDPT_DATAVERSE_CONFIG', '').strip()
 datas = [('web', 'web'), (update_config, '.'), ('dataverse_config.example.json', '.')]
+if dataverse_config:
+    # A release build may inject the shared, non-secret Dataverse connection
+    # defaults without committing them to the public repository.
+    datas.append((dataverse_config, '.'))
 binaries = []
 hiddenimports = ['productivity_tool', 'dataverse', 'app_paths', 'updater']
 tmp_ret = collect_all('webview')
