@@ -71,7 +71,7 @@ class UpdateServiceTests(unittest.TestCase):
         self.assertEqual(config["source"], "http")
         self.assertEqual(
             config["url"],
-            "https://github.com/jmlinguito-ux/gdpt/releases/latest/download",
+            "https://github.com/jmlinguito-ux/gdpt/releases/latest/download/",
         )
 
     def test_http_source_is_passed_directly_to_update_manager(self):
@@ -91,7 +91,7 @@ class UpdateServiceTests(unittest.TestCase):
         }), mock.patch.dict(sys.modules, {"velopack": fake_module}):
             service = UpdateService(lambda _state: None)
 
-        self.assertEqual(seen, [feed])
+        self.assertEqual(seen, [feed + "/"])
         self.assertEqual(service.state()["currentVersion"], "1.0.1")
 
 

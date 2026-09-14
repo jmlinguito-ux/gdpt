@@ -8,7 +8,7 @@ param(
     [string]$Source = 'http',
 
     [ValidatePattern('^https://')]
-    [string]$FeedUrl = 'https://github.com/jmlinguito-ux/gdpt/releases/latest/download',
+    [string]$FeedUrl = 'https://github.com/jmlinguito-ux/gdpt/releases/latest/download/',
 
     [string]$DataverseConfig = '',
 
@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Force -Path $generatedDirectory | Out-Null
 @{
     version = $Version
     source = $Source
-    url = $FeedUrl.TrimEnd('/')
+    url = $FeedUrl.TrimEnd('/') + '/'
     prerelease = $false
 } | ConvertTo-Json | Set-Content -LiteralPath $generatedConfig -Encoding utf8
 

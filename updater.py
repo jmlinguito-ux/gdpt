@@ -67,7 +67,10 @@ class UpdateService:
             else:
                 # A plain HTTPS URL selects Velopack's static web source. This
                 # avoids GitHub's anonymous REST API (60 requests/hour/IP).
-                source = url
+                # Keep the trailing slash: URL resolution otherwise treats the
+                # final path component as a file and drops "download" when
+                # Velopack appends releases.<channel>.json.
+                source = f"{url.rstrip('/')}/"
             manager = velopack.UpdateManager(source)
             current = manager.get_current_version()
             if current:
