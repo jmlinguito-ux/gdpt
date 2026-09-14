@@ -26,6 +26,11 @@ def load_update_config() -> dict:
         return {}
 
 
+def app_version() -> str:
+    """Version of this build, shown in the window title and the top bar."""
+    return str(load_update_config().get("version") or DEFAULT_VERSION)
+
+
 def run_startup_hooks() -> None:
     """Let Velopack process install/update command-line hooks before UI startup."""
     try:

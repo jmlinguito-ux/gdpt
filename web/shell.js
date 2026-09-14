@@ -242,6 +242,13 @@
     if (!u) return;
     const status = u.status || 'idle';
     setText('setAppVersion', 'Version ' + (u.currentVersion || '1.0.0'));
+    // Revealed only once the real version arrives, so the top bar never shows a
+    // placeholder version that contradicts the window title.
+    if (u.currentVersion) {
+      setText('tbVersion', 'v' + u.currentVersion);
+      const wrap = $('tbVersionWrap');
+      if (wrap) wrap.hidden = false;
+    }
     setText('updateStatus', u.message || (u.configured ? 'Ready to check' : 'Updates are not configured'));
     setText('updateLatest', u.latestVersion ? 'Latest: ' + u.latestVersion : '');
 

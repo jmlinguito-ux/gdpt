@@ -19,7 +19,7 @@ import time
 import traceback
 import multiprocessing
 
-from updater import UpdateService, run_startup_hooks
+from updater import UpdateService, run_startup_hooks, app_version
 
 # Velopack may need to handle an install/update command and exit before WebView2
 # or the rest of the application is initialised.
@@ -44,6 +44,10 @@ try:
 except Exception:  # noqa: BLE001
     dv = None
 
+
+# Single source of truth: the single-instance check finds the running window by
+# this exact title, so both uses must stay derived from the same string.
+APP_TITLE = f'Ground Data Processing Tool v{app_version()}'
 
 
 def _resource_dir() -> str:
@@ -2409,7 +2413,7 @@ def _ensure_single_instance() -> bool:
         last_error = kernel32.GetLastError()
 
         if last_error == ERROR_ALREADY_EXISTS:
-            hwnd = user32.FindWindowW(None, "Ground Data Processing Tool")
+            hwnd = user32.FindWindowW(None, APP_TITLE)
             if hwnd and user32.IsWindowVisible(hwnd):
                 user32.ShowWindow(hwnd, SW_RESTORE)
                 user32.SetForegroundWindow(hwnd)
@@ -2429,7 +2433,7 @@ def main():
 
     api = Api()
     index_html = os.path.join(_resource_dir(), 'index.html')
-    window = webview.create_window('Ground Data Processing Tool', index_html, js_api=api,
+    window = webview.create_window(APP_TITLE, index_html, js_api=api,
                                    width=1400, height=860, min_size=(1400, 860))
 
     def _force_exit():

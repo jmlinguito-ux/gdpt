@@ -164,6 +164,13 @@ body.busy, body.busy * { cursor: progress !important; }
   text-transform: uppercase; color: var(--ink3);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.tb-version {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+  color: var(--ink3); white-space: nowrap; flex: none;
+}
+/* Hidden until the real version arrives, so no stray divider at startup. */
+.tb-version-wrap { display: inline-flex; align-items: center; gap: 12px; flex: none; }
+.tb-version-wrap[hidden] { display: none; }
 .tb-right { display: flex; align-items: center; gap: 10px; flex: none; }
 
 .conn-pill {
