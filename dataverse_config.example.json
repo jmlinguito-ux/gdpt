@@ -1,0 +1,6 @@
+{
+  "environment_url": "https://YOUR_ORG.crm.dynamics.com",
+  "tenant_id": "YOUR_DIRECTORY_TENANT_ID",
+  "client_id": "YOUR_PUBLIC_CLIENT_APPLICATION_ID",
+  "solution_name": ""
+}

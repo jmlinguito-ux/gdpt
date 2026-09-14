@@ -1,0 +1,31 @@
+# Python / build outputs
+__pycache__/
+*.py[cod]
+build/
+dist/
+Releases/
+*.exe
+
+# Local application state and credentials
+.webview/
+.dv_token_cache.bin
+app_settings.json
+dataverse_config.json
+
+# User/customer data and office documents
+*.xlsx
+*.xls
+*.docx
+!templates/*.xlsx
+
+# Design snapshots and local backups
+_pre-redesign-backup/
+Ground Data Processing Tool.html
+Settings Save Button.html
+Sync Popup-selection.png
+
+# Editor / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

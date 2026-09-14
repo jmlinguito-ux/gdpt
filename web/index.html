@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ground Data Processing Tool</title>
+  <style>
+    /* Critical early style: keep splash hidden if not first run */
+    html.skip-splash #appSplash,
+    .skip-splash #appSplash {
+      display: none !important;
+    }
+  </style>
+  <script>
+    window.testErrors = [];
+    window.addEventListener('error', function(e) {
+      window.testErrors.push(e.message + ' at ' + e.filename + ':' + e.lineno);
+    });
+    if (localStorage.getItem('app_launched_before')) {
+      document.documentElement.classList.add('skip-splash');
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;450;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+  <noscript>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;450;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  </noscript>
+  <link rel="icon" type="image/png" href="app-icon.png" />
+  <link rel="shortcut icon" href="app-icon.png" />
+  <link rel="stylesheet" href="style.css?v=20260910a" />
+</head>
+
+<body>
+  <div id="appSplash" class="app-splash" style="display: none;">
+    <img src="splash.png" alt="GDPT+" class="app-splash-img" />
+  </div>
+  <script>
+    (function() {
+      var splashEl = document.getElementById('appSplash');
+      if (!localStorage.getItem('app_launched_before')) {
+        if (splashEl) splashEl.style.display = 'flex';
+      } else {
+        if (splashEl) splashEl.remove();
+      }
+    })();
+  </script>
+  <div class="app">
+
+    <!-- ============ TOP BAR ============ -->
+    <header class="topbar">
+      <div class="tb-left">
+        <img src="app-icon.png" alt="GDPT" class="tb-mark-img" />
+        <span class="tb-title">Ground Data Processing Tool</span>
+        <span class="tb-divider"></span>
+        <span class="tb-eyebrow">Desktop app developed by JMI</span>
+      </div>
+      <div class="tb-right">
+        <button class="conn-pill nav-item" data-view="settings" title="Open settings">
+          <span class="conn-dot" id="topConnDot"></span>
+          <span class="conn-label" id="topConnLabel">Not connected</span>
+        </button>
+        <button class="nav-item tb-dash" data-view="dashboard">Dashboard</button>
+      </div>
+    </header>
+
+    <!-- ============ WORKFLOW STRIP ============ -->
+    <div class="workflow-strip">
+      <div class="ws-steps">
+        <button class="nav-item step active" data-view="load">
+          <span class="step-n">1</span>
+          <span class="step-t">
+            <span class="step-label">Load</span>
+            <span class="step-sub" id="stepSubLoad">No file yet</span>
+          </span>
+        </button>
+        <button class="nav-item step" data-view="review">
+          <span class="step-n">2</span>
+          <span class="step-t">
+            <span class="step-label">Review</span>
+            <span class="step-sub" id="stepSubReview">Needs a file</span>
+          </span>
+        </button>
+        <button class="nav-item step" data-view="productivity">
+          <span class="step-n">3</span>
+          <span class="step-t">
+            <span class="step-label">Generate</span>
+            <span class="step-sub" id="stepSubProd">Calculates on run</span>
+          </span>
+        </button>
+        <button class="nav-item step" data-view="publish" data-pubstage="records">
+          <span class="step-n">4</span>
+          <span class="step-t">
+            <span class="step-label">Publish records</span>
+            <span class="step-sub" id="stepSubRecords">Create in record table</span>
+          </span>
+        </button>
+        <button class="nav-item step" data-view="publish" data-pubstage="prod">
+          <span class="step-n">5</span>
+          <span class="step-t">
+            <span class="step-label">Publish productivity</span>
+            <span class="step-sub" id="stepSubProd2">Records first</span>
+          </span>
+        </button>
+      </div>
+      <div class="ws-aside">
+        <span class="ws-note" id="wsNote"></span>
+        <button class="ws-primary hidden" id="wsPrimary"></button>
+      </div>
+    </div>
+
+    <div class="body-split">
+
+      <!-- ============ LEFT RAIL ============ -->
+      <aside class="sidebar">
+        <nav class="side-nav">
+          <div class="nav-group">Reference tables</div>
+          <button class="nav-item" data-ref="municipality"><span class="rail-chip">M</span> Municipality Code</button>
+          <button class="nav-item" data-ref="team"><span class="rail-chip">T</span> Team Composition</button>
+          <button class="nav-item" data-ref="mapping"><span class="rail-chip">S</span> Mapping Status</button>
+          <button class="nav-item" data-ref="build"><span class="rail-chip">B</span> Build Table</button>
+          <button class="nav-item" data-ref="existing"><span class="rail-chip">E</span> Existing Records</button>
+        </nav>
+        <div class="side-tail">
+          <div class="side-foot">
+            <span class="dot" id="sideDvDot"></span>
+            <span id="sideDvText">Dataverse: not connected</span>
+          </div>
+          <button class="nav-item side-settings" data-view="settings">Settings</button>
+        </div>
+      </aside>
+
+      <!-- ============ MAIN ============ -->
+      <div class="content">
+
+        <!-- ==================== VIEW: LOAD ==================== -->
+        <section class="view active" id="view-load">
+          <div class="stack">
+
+            <!-- solution + load type bar -->
+            <div class="bar-card">
+              <div class="bar-left">
+                <div class="bar-field">
+                  <span class="eyebrow">Solution</span>
+                  <select id="refSolutionSelect" class="bare-select" disabled>
+                    <option value="">Connect to Dataverse…</option>
+                  </select>
+                </div>
+                <span class="bar-divider"></span>
+                <div class="bar-field">
+                  <span class="eyebrow">Load type</span>
+                  <div class="mode-toggle" id="modeToggle">
+                    <button data-mode="negotiation" class="active">Negotiation</button>
+                    <button data-mode="land-sourcing">Land Sourcing</button>
+                  </div>
+                </div>
+              </div>
+              <button class="link-btn nav-item" data-view="explorer">Browse all solution tables</button>
+            </div>
+
+            <!-- SECTION A -->
+            <section class="sec">
+              <div class="sec-head">
+                <div class="sec-title">
+                  <span class="sec-letter">A</span>
+                  <h2>Reference tables to load</h2>
+                </div>
+                <div class="sec-actions">
+                  <button class="link-btn" id="btnSelectAllRefs">Select all</button>
+                  <span class="link-sep">·</span>
+                  <button class="link-btn" id="btnDeselAllRefs">Deselect all</button>
+                </div>
+              </div>
+
+              <div class="ref-list-box">
+                <div class="ref-list-head">
+                  <span></span>
+                  <span class="eyebrow">Reference</span>
+                  <span class="eyebrow">Dataverse table</span>
+                  <span class="eyebrow">Record count</span>
+                  <span class="eyebrow">Logical name</span>
+                  <span></span>
+                </div>
+                <div id="refGrid"></div>
+                <div class="ref-list-foot">
+                  <span class="foot-note">Tables come from the selected solution only. Use &ldquo;Fetch selected tables&rdquo; in the toolbar above.</span>
+                  <!-- Footer Fetch button removed (duplicate of the workflow-strip primary);
+                       kept hidden so the strip primary still has its click target. -->
+                  <button class="btn primary hidden" id="btnFetchAllDv" disabled>Fetch selected tables</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- SECTION B -->
+            <section class="sec">
+              <div class="sec-head">
+                <div class="sec-title">
+                  <span class="sec-letter">B</span>
+                  <h2>Transaction data file</h2>
+                  <span class="rc-badge" id="loadRowCount">0 rows</span>
+                </div>
+                <div class="sec-actions">
+                  <span class="eyebrow">Blank template</span>
+                  <button class="link-btn" data-inputtpl="negotiation"
+                          title="54 columns: TEAM, GROUP, NEGOTIATOR NAME, AREA-INDEX, INDEX NO, …">Negotiation <span class="col-count">54 cols</span></button>
+                  <span class="link-sep">·</span>
+                  <button class="link-btn" data-inputtpl="land-sourcing"
+                          title="30 columns: TEAM, GROUP, LSA NAME, AREA-INDEX, INDEX NO, …">Land Sourcing <span class="col-count">30 cols</span></button>
+                </div>
+              </div>
+
+              <div class="upload-dropzone" id="inputActionRow">
+                <span class="udz-icon-wrap"><span class="ico udz-icon" data-icon="cloud-upload"></span></span>
+                <div class="udz-body">
+                  <strong class="udz-title" id="inputActionTitle">Drop a file here, or click to browse</strong>
+                  <span class="udz-sub" id="inputActionSub">.csv &middot; .xlsx &middot; .xlsm</span>
+                </div>
+                <button class="btn udz-btn" id="btnInput">Browse</button>
+              </div>
+
+              <div class="upload-loaded-card hidden" id="inputLoadedStatus">
+                <div class="ulc-left">
+                  <span class="ulc-file-ico">&#10003;</span>
+                  <div class="ulc-info">
+                    <span class="ulc-name" id="inputFileName">filename.csv</span>
+                    <span class="ulc-meta">
+                      <span id="inputFileRowsBadge">0 rows</span>
+                      <span class="ulc-sep">&middot;</span>
+                      <span id="inputModeBadge">Negotiation</span>
+                      <span class="ulc-sep">&middot;</span>
+                      <span>loaded &amp; ready for review</span>
+                    </span>
+                  </div>
+                </div>
+                <button class="btn" id="btnChangeInput" title="Choose a different transaction file">Change file</button>
+              </div>
+            </section>
+
+          </div>
+        </section>
+
+        <!-- ==================== VIEW: REVIEW ==================== -->
+        <section class="view" id="view-review">
+          <div class="ws-head">
+            <div class="ws-head-left">
+              <h1>CSV Workspace</h1>
+              <span class="mono-meta" id="reviewCount">0 rows</span>
+            </div>
+            <div class="ws-head-right">
+              <button class="btn ghost" id="btnReviewIssuesOnly" title="Show only rows with invalid cells or Build mismatches" aria-pressed="false">Show issues only</button>
+              <button class="btn" id="btnSaveSource" disabled title="Write the current CSV Workspace rows back to the uploaded transaction file">Save to file</button>
+              <button class="btn primary" id="btnCalculate" disabled>Calculate</button>
+              <!-- Generate productivity lives in the workflow strip primary; removed here to avoid duplication.
+                   btnGenerate is kept (hidden) as the strip's click target. -->
+              <button class="btn hidden" id="btnGenerate" disabled>Generate productivity</button>
+            </div>
+          </div>
+          <div id="reviewValidationBar" class="validation-warning-bar hidden"></div>
+          <div class="table-wrap flex-table" id="reviewWrap">
+            <div class="empty" id="reviewEmpty"><span class="ico empty-ico" data-icon="grid"></span><p>Upload a file in step 1 to see the review table.</p></div>
+            <table id="reviewTable" class="hidden"><thead></thead><tbody></tbody></table>
+          </div>
+        </section>
+
+        <!-- ==================== VIEW: PRODUCTIVITY ==================== -->
+        <section class="view" id="view-productivity">
+          <div class="ws-head">
+            <div class="ws-head-left">
+              <h1>Productivity Workspace</h1>
+              <span class="mono-meta" id="prodCount">0 rows</span>
+            </div>
+            <div class="ws-head-right">
+              <button class="btn ghost" id="btnProdIssuesOnly" title="Show only rows with invalid cells, invalid dates, or unassigned (blank) matched negotiators/sourcers" aria-pressed="false">Show issues only</button>
+              <button class="btn" id="btnClearFilters" disabled>Clear filters</button>
+              <!-- the publish target now lives on stage 4 / Settings; kept here so
+                   applyState can populate it and Settings can mirror it -->
+              <div class="inline-field hidden">
+                <span class="eyebrow">Publish target</span>
+                <select id="prodTargetTableSelect" class="select" title="Target Productivity Table in Dataverse">
+                  <option value="">Select Productivity Table…</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div id="prodValidationBar" class="validation-warning-bar hidden"></div>
+          <div class="table-wrap flex-table" id="prodWrap">
+            <div class="empty" id="prodEmpty"><span class="ico empty-ico" data-icon="chart"></span><p>Generate productivity rows to see the output table.</p></div>
+            <table id="prodTable" class="hidden"><thead></thead><tbody></tbody></table>
+          </div>
+        </section>
+
+        <!-- ==================== VIEW: PUBLISH (stage 4) ==================== -->
+        <section class="view" id="view-publish">
+          <div class="centered-col">
+            <div id="modalPublish">
+
+              <div id="publishForm">
+                <div class="page-head">
+                  <h1 class="pm-title">Publish to Dataverse</h1>
+                  <p class="pm-desc" id="modalPublishDesc">Select the Productivity table within your Dataverse solution to publish calculated productivity rows.</p>
+                </div>
+
+                <div class="panel">
+                  <div class="panel-body">
+                    <div class="pm-section">
+                      <label class="pm-label" for="modalPublishTableSelect">Target Dataverse Table (Solution Only):</label>
+                      <div class="pm-select-wrapper">
+                        <select id="modalPublishTableSelect" class="pm-select"></select>
+                        <span class="pm-select-chevron">&#9662;</span>
+                      </div>
+
+                      <div class="pm-val-box" id="modalPublishValBox">
+                        <div class="pm-val-head" id="mvbHead">
+                          <span class="pm-val-dot" id="mvbIco"></span>
+                          <span class="pm-val-title" id="mvbTitle">Select a target table to validate records.</span>
+                        </div>
+                        <div class="pm-val-errors hidden" id="mvbErrors"></div>
+                      </div>
+                    </div>
+
+                    <div class="pm-summary-grid">
+                      <div class="pm-summary-row">
+                        <span class="pm-summary-label">Records to Publish</span>
+                        <span class="pm-summary-value pm-mono-val" id="modalPublishRowCount">0 rows</span>
+                      </div>
+                      <div class="pm-summary-row">
+                        <span class="pm-summary-label">Workspace</span>
+                        <span class="pm-summary-value" id="modalPublishWorkspace">Productivity Workspace (Generated Rows)</span>
+                      </div>
+                      <div class="pm-summary-row">
+                        <span class="pm-summary-label">Active Solution</span>
+                        <span class="pm-summary-value" id="modalPublishSolutionName">—</span>
+                      </div>
+                      <div class="pm-summary-row">
+                        <span class="pm-summary-label">Connection</span>
+                        <span class="pm-summary-value">
+                          <span class="pm-status-pill" id="modalPublishStatus">
+                            <span class="pm-status-dot"></span>
+                            <span class="pm-status-text" id="modalPublishStatusText">Not connected</span>
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div class="pm-save-option">
+                      <label class="pm-checkbox-label">
+                        <input type="checkbox" id="modalPublishSaveConfig" class="pm-checkbox" checked />
+                        <span class="pm-custom-check"></span>
+                        <span class="pm-save-text">Save this table selection in settings for future publishes</span>
+                      </label>
+                    </div>
+
+                    <div class="pm-save-option">
+                      <label class="pm-checkbox-label">
+                        <input type="checkbox" id="modalPublishOverride" class="pm-checkbox" />
+                        <span class="pm-custom-check"></span>
+                        <span class="pm-save-text">Override existing records on duplicate (update in place instead of skipping)</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="panel-foot">
+                    <span class="foot-note">Rows are written to the selected table only.</span>
+                    <div class="foot-actions">
+                      <button type="button" class="btn danger-outline hidden" id="modalPublishFixErrors">Review &amp; fix in table</button>
+                      <button type="button" class="btn" id="modalPublishCancel">Back to rows</button>
+                      <button type="button" class="btn primary" id="modalPublishConfirm">Publish now</button>
+                      <button type="button" class="hidden" id="modalPublishClose"></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div id="publishReceipt" class="hidden">
+                <div class="receipt-hero">
+                  <span class="receipt-check">&#10003;</span>
+                  <div class="receipt-hero-text">
+                    <h1 id="receiptHeadline">0 rows published</h1>
+                    <p id="receiptSub">Written to Dataverse. Nothing else in the solution was touched.</p>
+                  </div>
+                </div>
+                <div class="panel receipt-panel">
+                  <div class="panel-body" style="padding: 16px 22px;">
+                    <div id="receiptRows"></div>
+                  </div>
+                  <div class="panel-foot">
+                    <span class="foot-note" id="receiptFootNote">All published rows are live in Dataverse.</span>
+                    <div class="foot-actions">
+                      <button type="button" class="btn hidden" id="btnReceiptExport">Export skipped &amp; failed (CSV)</button>
+                      <button type="button" class="btn" id="btnPublishAgain">Load another file</button>
+                      <button type="button" class="btn nav-item" id="btnReceiptDashboard" data-view="dashboard">Open dashboard</button>
+                      <button type="button" class="btn primary hidden" id="btnReceiptNextProd">Next: Publish productivity &rarr;</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== VIEW: REFERENCE ==================== -->
+        <section class="view" id="view-ref">
+          <div class="ws-head">
+            <div class="ws-head-left">
+              <span class="ico head-ico hidden" id="refTitleIco" data-icon="table"></span>
+              <h1 id="refTitle">Reference</h1>
+              <span class="mono-meta" id="refCount">0 rows</span>
+              <span class="src-pill" id="refSource"></span>
+            </div>
+            <div class="ws-head-right">
+              <div class="search-box">
+                <span class="ico" data-icon="search"></span>
+                <input type="text" id="refSearchInput" class="input" placeholder="Search all columns" />
+              </div>
+              <div class="inline-field">
+                <span class="eyebrow">Dataverse table</span>
+                <select id="refViewerTableSelect" class="select" title="Choose which Dataverse table to bind and view"></select>
+              </div>
+              <!-- "Refresh from Dataverse" in the workflow strip is the single
+                   way to re-fetch; this button is its hidden click target -->
+              <button class="btn hidden" id="refRefresh" title="Reload from Dataverse">Refresh</button>
+              <button class="btn" id="refUploadFile" title="Upload Excel or CSV file to replace records in this table">Upload file</button>
+              <button class="btn hidden" id="refBuildSync" title="Upload a Build file and sync it to the selected Dataverse Build table (insert new, overwrite on newer Work Week, never delete)">Sync to Dataverse</button>
+              <button class="btn" id="refClearFilters" disabled>Clear filters</button>
+              <button class="btn primary" id="refAddRow">Add row</button>
+            </div>
+          </div>
+
+          <div class="tip-bar">
+            <span class="tip-dot"></span>
+            <span>Click any cell to edit in place. Edits and new rows sync straight to Dataverse.</span>
+          </div>
+
+          <div class="table-wrap flex-table" id="refWrap">
+            <div class="empty" id="refEmpty"><span class="ico empty-ico" data-icon="table"></span><p>No rows loaded for this table from Dataverse yet.</p></div>
+            <table id="refTable" class="hidden"><thead></thead><tbody></tbody></table>
+          </div>
+        </section>
+
+        <!-- ==================== VIEW: DASHBOARD ==================== -->
+        <section class="view" id="view-dashboard">
+          <div class="stack">
+
+            <div class="ws-head">
+              <div class="ws-head-left col">
+                <h1>Ground operations</h1>
+                <span class="sub-head">Published reports across Negotiation and Land Sourcing.</span>
+              </div>
+              <div class="ws-head-right">
+                <span class="src-pill" id="dbSourcePill">Workspace &amp; Dataverse</span>
+                <span class="rc-badge loaded" id="dbTotalBadge">0 Reports</span>
+                <div class="seg" id="dbModeFilters">
+                  <button class="btn xs active" data-db-filter="nego">Negotiation</button>
+                  <button class="btn xs" data-db-filter="sourcing">Land Sourcing</button>
+                </div>
+                <button class="btn primary" id="btnFetchDashboard">Fetch data</button>
+              </div>
+            </div>
+
+            <div class="db-filter-bar">
+              <div class="db-filter-left">
+                <div class="db-date-picker-group">
+                  <span class="eyebrow">Report date range</span>
+                  <div class="db-date-input-wrap">
+                    <label for="dbDateFrom" class="db-input-sublabel">From</label>
+                    <input type="date" id="dbDateFrom" class="input db-date-input" title="Start Report Date" />
+                  </div>
+                  <span class="db-date-sep">to</span>
+                  <div class="db-date-input-wrap">
+                    <label for="dbDateTo" class="db-input-sublabel">To</label>
+                    <input type="date" id="dbDateTo" class="input db-date-input" title="End Report Date" />
+                  </div>
+                </div>
+                <div class="db-ww-filter-group">
+                  <label for="dbWwSelect" class="eyebrow">Work week</label>
+                  <select id="dbWwSelect" class="select db-ww-select" title="Filter by Work Week (e.g. WW35, WW34)">
+                    <option value="" selected>All work weeks</option>
+                  </select>
+                </div>
+                <button class="link-btn" id="btnDbClearDateRange" title="Reset date and work week filters">Clear</button>
+              </div>
+              <div class="db-filter-right">
+                <div class="db-preset-wrap">
+                  <label for="dbDatePreset" class="eyebrow">Quick preset</label>
+                  <select id="dbDatePreset" class="select db-preset-select">
+                    <option value="all" selected>All Time</option>
+                    <option value="today">Today</option>
+                    <option value="this_week">This Week</option>
+                    <option value="this_month">This Month</option>
+                    <option value="last_30">Last 30 Days</option>
+                    <option value="last_90">Last 90 Days</option>
+                    <option value="this_year">This Year</option>
+                  </select>
+                </div>
+                <span class="db-filtered-pill hidden" id="dbFilterStatusPill">Filtered query</span>
+              </div>
+            </div>
+
+            <div class="db-kpi-grid">
+              <div class="kpi-card" id="kpiCardNego">
+                <span class="kpi-label">Negotiation reports</span>
+                <span class="kpi-val" id="kpiNegoCount">0</span>
+                <span class="kpi-sub">Latest <strong id="kpiLatestNegoDate">—</strong></span>
+              </div>
+              <div class="kpi-card" id="kpiCardSourcing">
+                <span class="kpi-label">Land sourcing reports</span>
+                <span class="kpi-val" id="kpiSourcingCount">0</span>
+                <span class="kpi-sub">Latest <strong id="kpiLatestSourcingDate">—</strong></span>
+              </div>
+              <div class="kpi-card" id="kpiCardPeak">
+                <span class="kpi-label">Busiest day</span>
+                <span class="kpi-val" id="kpiPeakCount">0</span>
+                <span class="kpi-sub">on <strong id="kpiPeakDate">—</strong></span>
+              </div>
+              <div class="kpi-card" id="kpiCardMuni">
+                <span class="kpi-label">Municipalities covered</span>
+                <span class="kpi-val" id="kpiMuniCount">0</span>
+                <span class="kpi-sub">Top: <strong id="kpiTopMuni">—</strong></span>
+              </div>
+            </div>
+
+            <div class="db-grid-split">
+              <div class="db-panel">
+                <div class="db-panel-head">
+                  <h3>Reports by date</h3>
+                  <span class="eyebrow" id="dbDateCount">0 dates</span>
+                </div>
+                <div class="db-table-wrap">
+                  <table class="db-table" id="dbDateTable">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>WW</th>
+                        <th class="num">Reports</th>
+                        <th class="bar-col">Share</th>
+                      </tr>
+                    </thead>
+                    <tbody id="dbDateTbody">
+                      <tr><td colspan="4" class="empty-cell">Set query parameters and click &lsquo;Fetch data&rsquo;.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="db-panel">
+                <div class="db-panel-head">
+                  <h3 id="dbMuniTitle">Count per municipality</h3>
+                  <span class="db-head-right">
+                    <button class="link-btn hidden" id="dbMuniClearDay" title="Show all days in the range">Show all days</button>
+                    <span class="eyebrow" id="dbMuniCount">0 municipalities</span>
+                  </span>
+                </div>
+                <div class="db-table-wrap">
+                  <table class="db-table" id="dbMuniTable">
+                    <thead>
+                      <tr>
+                        <th>Municipality</th>
+                        <th>MuniCode</th>
+                        <th class="num">Reports</th>
+                        <th class="bar-col">Share</th>
+                      </tr>
+                    </thead>
+                    <tbody id="dbMuniTbody">
+                      <tr><td colspan="4" class="empty-cell">Set query parameters and click &lsquo;Fetch data&rsquo;.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- ==================== VIEW: SOLUTION EXPLORER ==================== -->
+        <section class="view" id="view-explorer">
+          <div class="stack">
+            <div class="ws-head">
+              <div class="ws-head-left">
+                <h1>Solution &amp; table explorer</h1>
+                <span class="mono-meta" id="explorerCount">0 tables</span>
+              </div>
+              <div class="ws-head-right">
+                <button class="btn" id="btnRefreshSolutions">Refresh</button>
+              </div>
+            </div>
+
+            <div class="explorer-toolbar">
+              <div class="field-col">
+                <label for="solutionSelect" class="eyebrow">Select solution</label>
+                <select id="solutionSelect" class="select">
+                  <option value="">All Tables / Select Solution…</option>
+                </select>
+              </div>
+              <div class="field-col flex-1">
+                <label for="tableSearch" class="eyebrow">Filter tables</label>
+                <input type="text" id="tableSearch" class="input" placeholder="Search tables by display name..." />
+              </div>
+            </div>
+
+            <div class="explorer-grid" id="explorerGrid">
+              <div class="empty" id="explorerEmpty"><p>Connect to Dataverse to explore solution tables.</p></div>
+            </div>
+
+            <div class="panel hidden" id="cardTablePreview">
+              <div class="panel-head">
+                <div class="ws-head-left">
+                  <h3 id="previewTableName">Table preview</h3>
+                  <span class="mono-meta" id="previewRowCount">0 rows</span>
+                  <span class="mono-meta" id="previewTableSource"></span>
+                </div>
+                <div class="ws-head-right">
+                  <select id="mapAsReferenceSelect" class="select">
+                    <option value="">Map as Reference Table…</option>
+                    <option value="team">Team Composition</option>
+                    <option value="municipality">Municipality Code</option>
+                    <option value="mapping">Mapping Status</option>
+                    <option value="build">Build Table</option>
+                    <option value="existing">Existing Records</option>
+                  </select>
+                  <button class="btn primary" id="btnApplyMap">Map &amp; load</button>
+                  <button class="btn" id="btnClosePreview">Close</button>
+                </div>
+              </div>
+              <div class="table-wrap tall" id="previewWrap">
+                <table id="previewTable" class="hidden"><thead></thead><tbody></tbody></table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== VIEW: SETTINGS ==================== -->
+        <section class="view" id="view-settings">
+          <div class="centered-col">
+            <h1 class="settings-title">Settings</h1>
+
+            <div class="panel">
+              <div class="panel-head">
+                <h3>Dataverse connection</h3>
+                <div class="conn-inline">
+                  <span class="conn-dot" id="setConnDot"></span>
+                  <span class="eyebrow" id="setConnText">Not connected</span>
+                </div>
+              </div>
+              <div class="panel-body form-rows">
+
+                <div class="form-row">
+                  <span class="form-label">Environment URL</span>
+                  <div class="form-control">
+                    <input type="text" id="setOrgUrl" class="input mono-input" placeholder="https://org.crm.dynamics.com" />
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <span class="form-label">Sign-in</span>
+                  <div class="form-control">
+                    <button class="btn primary" id="btnConnect">Connect</button>
+                    <button class="btn hidden" id="btnDisconnect">Disconnect</button>
+                    <span class="dv-badge" id="dvStatus">Not connected</span>
+                    <span class="form-hint" id="setConnHint">Device code sign-in via Microsoft</span>
+                  </div>
+                </div>
+
+                <div class="device-code hidden" id="deviceCode">
+                  <div class="dc-left">
+                    <p>Open <a href="#" id="dcUrl" target="_blank"></a> and enter this code</p>
+                    <div class="code-row"><span class="code" id="dcCode"></span><button class="btn xs" id="dcCopy">Copy</button></div>
+                  </div>
+                  <span class="eyebrow">Waiting…</span>
+                </div>
+
+                <div class="form-row">
+                  <span class="form-label">Active solution</span>
+                  <div class="form-control">
+                    <select id="setSolutionSelect" class="select wide" disabled>
+                      <option value="">Connect to Dataverse…</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <span class="form-label">Tenant ID</span>
+                  <div class="form-control">
+                    <input type="text" id="setTenantId" class="input mono-input" placeholder="00000000-0000-0000-0000-000000000000" />
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <span class="form-label">Client ID</span>
+                  <div class="form-control">
+                    <input type="text" id="setClientId" class="input mono-input" placeholder="00000000-0000-0000-0000-000000000000" />
+                  </div>
+                </div>
+
+              </div>
+
+              <div class="panel-foot">
+                <span class="eyebrow" id="setConnDirty"></span>
+                <div class="foot-actions">
+                  <button class="btn hidden" id="btnDiscardConnection">Discard</button>
+                  <button class="btn primary" id="btnSaveConnection">Save connection</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel update-panel">
+              <div class="panel-head">
+                <h3>Software updates</h3>
+                <span class="eyebrow" id="setAppVersion">Version 1.0.0</span>
+              </div>
+              <div class="panel-body">
+                <div class="update-summary">
+                  <span class="update-dot" id="updateDot"></span>
+                  <div>
+                    <div class="update-status" id="updateStatus">Ready to check</div>
+                    <div class="form-hint" id="updateHint">Updates are checked automatically when the app starts.</div>
+                  </div>
+                </div>
+                <div class="update-progress hidden" id="updateProgress" aria-label="Update download progress">
+                  <div class="update-progress-bar" id="updateProgressBar"></div>
+                </div>
+                <div class="update-notes hidden" id="updateNotes"></div>
+              </div>
+              <div class="panel-foot">
+                <span class="eyebrow" id="updateLatest"></span>
+                <div class="foot-actions">
+                  <button class="btn" id="btnCheckUpdate">Check for updates</button>
+                  <button class="btn primary hidden" id="btnDownloadUpdate">Download update</button>
+                  <button class="btn primary hidden" id="btnInstallUpdate">Update and restart</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>Appearance</h3></div>
+              <div class="panel-body form-rows">
+                <div class="form-row">
+                  <span class="form-label">Theme</span>
+                  <div class="form-control">
+                    <div class="seg" id="themeSeg">
+                      <button class="btn xs active" data-theme="light">Light</button>
+                      <button class="btn xs" data-theme="dark">Dark</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <span class="form-label">Table density</span>
+                  <div class="form-control">
+                    <div class="seg" id="densitySeg">
+                      <button class="btn xs active" data-density="comfortable">Comfortable</button>
+                      <button class="btn xs" data-density="compact">Compact</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <span class="form-label">Publish</span>
+                  <div class="form-control">
+                    <label class="pm-checkbox-label">
+                      <input type="checkbox" id="setRememberPublish" class="pm-checkbox" checked />
+                      <span class="pm-custom-check"></span>
+                      <span class="check-text">Remember the publish table selection between sessions</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+      </div><!-- /.content -->
+    </div><!-- /.body-split -->
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="icons.js?v=20260909e"></script>
+  <script src="app.js?v=20260910j"></script>
+  <script src="shell.js?v=20260914a"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+openpyxl
+pywebview
+pyinstaller>=6.19
+msal
+requests
+velopack==1.2.0
