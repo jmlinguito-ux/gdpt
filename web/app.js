@@ -415,10 +415,16 @@ function confirmBuildMismatch(onProceed, proceedLabel) {
 }
 
 // --- view switching ---------------------------------------------------------
+// The workflow strip tracks the 5-step CSV pipeline. Views outside that flow
+// hide it instead of showing steps that do not apply to them.
+const STRIPLESS_VIEWS = new Set(['editor', 'editor-results']);
+
 function showView(view) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   const targetView = $('view-' + view);
   if (targetView) targetView.classList.add('active');
+  const strip = $('workflowStrip');
+  if (strip) strip.classList.toggle('hidden', STRIPLESS_VIEWS.has(view));
   document.querySelectorAll('.nav-item').forEach(n => {
     if (n.classList.contains('step')) return; // handled by syncSteps
     n.classList.toggle('active', n.dataset.view === view);
@@ -442,6 +448,9 @@ async function showReference(kind) {
   if (refSearchEl) refSearchEl.value = '';
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   $('view-ref').classList.add('active');
+  // This view is switched without showView(), so restore the strip here too.
+  const refStrip = $('workflowStrip');
+  if (refStrip) refStrip.classList.remove('hidden');
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.ref === kind));
   const icoEl = $('refTitleIco');
   icoEl.dataset.icon = REF_ICON[kind] || 'table';

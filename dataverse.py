@@ -839,6 +839,43 @@ class DataverseClient:
                     updated += 1
         return {'ok': True, 'updated': updated, 'results': [r for r in results if r is not None]}
 
+    def update_records_fields_batch(self, logical_name: str, updates: list, chunk_size: int = 100) -> dict:
+        """PATCH chosen fields on existing records, addressed by logical column name.
+
+        update_records_batch() translates canonical CSV headers onto fields for
+        publishing. The editable grids already hold Dataverse logical names, so
+        they go straight through without that translation.
+
+        `updates`: [{'_record_id': guid, 'fields': {logical: value}, 'label': str}]
+        """
+        if not updates:
+            return {'ok': False, 'error': 'No records to update.', 'updated': 0, 'results': []}
+        info = self.get_entity_info(logical_name)
+        entity_set = info['entitySetName']
+
+        results = [None] * len(updates)
+        prepared = []
+        for i, u in enumerate(updates):
+            rid = str(u.get('_record_id') or '').strip().strip('{}')
+            fields = {k: v for k, v in (u.get('fields') or {}).items() if k and not k.startswith('_')}
+            if not rid or not fields:
+                results[i] = {'row': i + 1, 'label': u.get('label'), 'status': 'empty',
+                              'error': 'No changed columns or missing record id'}
+                prepared.append(None)
+            else:
+                prepared.append((rid, self._format_payload(logical_name, fields)))
+
+        updated = 0
+        pending = [i for i, p in enumerate(prepared) if p is not None]
+        for start in range(0, len(pending), chunk_size):
+            idx_chunk = pending[start:start + chunk_size]
+            batch_results = self._post_batch_updates(entity_set, [(i, prepared[i][0], prepared[i][1]) for i in idx_chunk])
+            for i, (status, err, _id) in batch_results.items():
+                results[i] = {'row': i + 1, 'label': updates[i].get('label'), 'status': status, 'error': err}
+                if status == 'updated':
+                    updated += 1
+        return {'ok': True, 'updated': updated, 'results': [r for r in results if r is not None]}
+
     def _post_batch_updates(self, entity_set: str, indexed: list) -> dict:
         """PATCH a chunk of records as one $batch, each in its own changeset.
 
@@ -1734,17 +1771,12 @@ class DataverseClient:
         self._entity_info_cache = {}
 
 
-    def get_any_table_data(self, logical_name: str, top: int = 500) -> dict:
-        """Fetch columns and live rows from ANY table in Dataverse."""
-        # 1. get entity definition (for entity set name and display name)
-        ent_url = f"{self.api_root}EntityDefinitions(LogicalName='{logical_name}')?$select=LogicalName,DisplayName,EntitySetName"
-        ent_data = self._get(ent_url)
-        entity_set = ent_data.get('EntitySetName') or f"{logical_name}s"
-        disp = ent_data.get('DisplayName') or {}
-        table_title = ((disp.get('UserLocalizedLabel') or {}).get('Label')
-                       or (disp.get('LocalizedLabels') or [{}])[0].get('Label') if disp else None) or logical_name
+    def get_table_columns(self, logical_name: str) -> list[dict]:
+        """Readable, non-identifier columns for a table, ordered for display.
 
-        # 2. get attributes
+        Shared by the table preview and by the editable loaders' column picker,
+        so the two always offer exactly the same column set.
+        """
         attr_url = (f"{self.api_root}EntityDefinitions(LogicalName='{logical_name}')/Attributes"
                     "?$select=LogicalName,DisplayName,AttributeType,IsValidForRead&$filter=IsValidForRead eq true")
         attr_data = self._get(attr_url)
@@ -1756,14 +1788,139 @@ class DataverseClient:
                       or (cdisp.get('LocalizedLabels') or [{}])[0].get('Label') if cdisp else None)
             ctype = a.get('AttributeType')
             # Identifier columns (primary key, owner, ...) only ever show a raw
-            # GUID, so keep them out of the preview entirely.
+            # GUID, so keep them out entirely.
             if clogical and not clogical.startswith('_') and clabel and _type_rank(ctype) < 2:
                 col_list.append({'logical': clogical, 'label': clabel, 'type': ctype})
-
         # sort columns with non-system first
         col_list.sort(key=lambda c: (c['logical'].startswith('created') or c['logical'].startswith('modified') or c['logical'].startswith('version'), c['label'].lower()))
         if not col_list:
             col_list = [{'logical': 'id', 'label': 'ID', 'type': 'String'}]
+        return col_list
+
+    def get_table_load_options(self, logical_name: str) -> dict:
+        """Column picker payload: every readable column plus the date columns
+        that can scope a load."""
+        cols = self.get_table_columns(logical_name)
+        date_cols = [c for c in cols if c.get('type') in ('DateTime', 'Date')]
+        if not date_cols:
+            # Some tables store the date as text; offer those as a fallback so a
+            # range can still be applied.
+            date_cols = [c for c in cols if 'date' in c['logical'].lower()]
+        return {
+            'ok': True,
+            'logicalName': logical_name,
+            'columns': cols,
+            'dateColumns': date_cols,
+            'defaultDateColumn': date_cols[0]['logical'] if date_cols else '',
+        }
+
+    @staticmethod
+    def _date_range_filter(date_meta: dict, date_from: str, date_to: str) -> str:
+        """OData filter for a date column, quoted according to its type."""
+        col = date_meta['logical']
+        clauses = []
+        if date_meta.get('type') == 'DateTime':
+            if date_from:
+                clauses.append(f"{col} ge {date_from}T00:00:00Z")
+            if date_to:
+                clauses.append(f"{col} le {date_to}T23:59:59Z")
+        else:
+            if date_from:
+                clauses.append(f"{col} ge '{date_from}'")
+            if date_to:
+                clauses.append(f"{col} le '{date_to}'")
+        return f"({' and '.join(clauses)})" if clauses else ''
+
+    def get_table_choices(self, logical_name: str, wanted: set[str] | None = None) -> dict:
+        """Option-set labels for a table's picklist columns, as {logical: [labels]}.
+
+        Fetched in one metadata call for the whole table rather than one per
+        column, so opening a grid with several choice columns stays a single
+        round-trip.
+        """
+        out: dict[str, list[str]] = {}
+        base = f"{self.api_root}EntityDefinitions(LogicalName='{logical_name}')/Attributes"
+        for cast in ('Microsoft.Dynamics.CRM.PicklistAttributeMetadata',
+                     'Microsoft.Dynamics.CRM.StateAttributeMetadata',
+                     'Microsoft.Dynamics.CRM.StatusAttributeMetadata'):
+            try:
+                data = self._get(f"{base}/{cast}?$select=LogicalName&$expand=OptionSet($select=Options)")
+            except Exception:  # noqa: BLE001
+                continue  # a table with no picklists of this kind is not an error
+            for a in data.get('value', []) or []:
+                logical = a.get('LogicalName')
+                if not logical or (wanted and logical not in wanted):
+                    continue
+                labels = []
+                for opt in ((a.get('OptionSet') or {}).get('Options') or []):
+                    lab = opt.get('Label') or {}
+                    text = ((lab.get('UserLocalizedLabel') or {}).get('Label')
+                            or (lab.get('LocalizedLabels') or [{}])[0].get('Label') if lab else None)
+                    if text:
+                        labels.append(str(text))
+                if labels:
+                    out[logical] = labels
+        return out
+
+    def load_table_records(self, logical_name: str, columns: list[str] | None = None,
+                           date_column: str = '', date_from: str = '', date_to: str = '',
+                           limit: int | None = None) -> dict:
+        """Load editable rows from any table, reading only the chosen columns.
+
+        Narrowing $select and filtering server-side is the whole point: an
+        unscoped read pages the entire table before the grid can render.
+        """
+        info = self.get_entity_info(logical_name)
+        entity_set = info['entitySetName']
+        pk = info.get('primaryIdAttribute')
+        all_cols = self.get_table_columns(logical_name)
+        by_logical = {c['logical']: c for c in all_cols}
+        chosen = [by_logical[c] for c in (columns or []) if c in by_logical]
+        if not chosen:
+            chosen = all_cols[:25]
+
+        select = [_select_name(c) for c in chosen]
+        if pk and pk not in select:
+            select.append(pk)
+
+        filter_str = ''
+        if date_column and (date_from or date_to) and date_column in by_logical:
+            filter_str = self._date_range_filter(by_logical[date_column], date_from, date_to)
+
+        rows_raw = self._get_all(entity_set, select, formatted=_needs_formatting(*chosen),
+                                 top=min(limit, 5000) if limit else 5000,
+                                 filter_str=filter_str or None, max_rows=limit)
+        rows = []
+        for r in rows_raw:
+            row = {c['logical']: _formatted(r, c['logical']) for c in chosen}
+            row['_record_id'] = _s(r.get(pk)) if pk else ''
+            row['_entity_logical'] = logical_name
+            rows.append(row)
+        choice_cols = {c['logical'] for c in chosen
+                       if c.get('type') in ('Picklist', 'State', 'Status')}
+        return {
+            'ok': True,
+            'logicalName': logical_name,
+            'columns': [c['logical'] for c in chosen],
+            'labels': [c['label'] for c in chosen],
+            'types': {c['logical']: c.get('type') for c in chosen},
+            'choices': self.get_table_choices(logical_name, choice_cols) if choice_cols else {},
+            'rows': rows,
+            'count': len(rows),
+            'filtered': bool(filter_str),
+        }
+
+    def get_any_table_data(self, logical_name: str, top: int = 500) -> dict:
+        """Fetch columns and live rows from ANY table in Dataverse."""
+        # 1. get entity definition (for entity set name and display name)
+        ent_url = f"{self.api_root}EntityDefinitions(LogicalName='{logical_name}')?$select=LogicalName,DisplayName,EntitySetName"
+        ent_data = self._get(ent_url)
+        entity_set = ent_data.get('EntitySetName') or f"{logical_name}s"
+        disp = ent_data.get('DisplayName') or {}
+        table_title = ((disp.get('UserLocalizedLabel') or {}).get('Label')
+                       or (disp.get('LocalizedLabels') or [{}])[0].get('Label') if disp else None) or logical_name
+
+        col_list = self.get_table_columns(logical_name)
 
         select_cols = [_select_name(c) for c in col_list[:60]]  # limit select to 60 columns for safe URL size
         rows_raw = self._get_all(entity_set, select_cols, formatted=True, top=top)

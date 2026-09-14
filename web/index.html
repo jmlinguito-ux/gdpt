@@ -69,7 +69,7 @@
     </header>
 
     <!-- ============ WORKFLOW STRIP ============ -->
-    <div class="workflow-strip">
+    <div class="workflow-strip" id="workflowStrip">
       <div class="ws-steps">
         <button class="nav-item step active" data-view="load">
           <span class="step-n">1</span>
@@ -124,6 +124,8 @@
           <button class="nav-item" data-ref="mapping"><span class="rail-chip">S</span> Mapping Status</button>
           <button class="nav-item" data-ref="build"><span class="rail-chip">B</span> Build Table</button>
           <button class="nav-item" data-ref="existing"><span class="rail-chip">E</span> Existing Records</button>
+          <div class="nav-group">Dataverse</div>
+          <button class="nav-item" data-view="editor"><span class="rail-chip">D</span> Records editor</button>
         </nav>
         <div class="side-tail">
           <div class="side-foot">
@@ -407,7 +409,7 @@
         <section class="view" id="view-ref">
           <div class="ws-head">
             <div class="ws-head-left">
-              <span class="ico head-ico hidden" id="refTitleIco" data-icon="table"></span>
+              <span class="ico head-ico hidden" id="refTitleIco" data-icon="grid"></span>
               <h1 id="refTitle">Reference</h1>
               <span class="mono-meta" id="refCount">0 rows</span>
               <span class="src-pill" id="refSource"></span>
@@ -437,7 +439,7 @@
           </div>
 
           <div class="table-wrap flex-table" id="refWrap">
-            <div class="empty" id="refEmpty"><span class="ico empty-ico" data-icon="table"></span><p>No rows loaded for this table from Dataverse yet.</p></div>
+            <div class="empty" id="refEmpty"><span class="ico empty-ico" data-icon="grid"></span><p>No rows loaded for this table from Dataverse yet.</p></div>
             <table id="refTable" class="hidden"><thead></thead><tbody></tbody></table>
           </div>
         </section>
@@ -577,6 +579,100 @@
         </section>
 
         <!-- ==================== VIEW: SOLUTION EXPLORER ==================== -->
+        <!-- ============ RECORDS EDITOR ============ -->
+        <section class="view" id="view-editor">
+          <div class="stack">
+            <div class="ws-head">
+              <div class="ws-head-left">
+                <h1>Records editor</h1>
+                <span class="mono-meta" id="editorLoadHint">Pick a record set, table, dates and columns</span>
+              </div>
+              <div class="ws-head-right">
+                <button class="btn ghost hidden" id="btnEditorBackToResults">Back to loaded records</button>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head">
+                <div class="panel-title">Load options</div>
+                <div class="panel-sub">Pick only the dates and columns you need — narrowing both is what keeps the load fast.</div>
+              </div>
+              <div class="panel-body">
+                <div class="editor-toolbar">
+                  <div class="field-col">
+                    <label for="editorScope" class="eyebrow">Record set</label>
+                    <select id="editorScope" class="select">
+                      <option value="sourcing-records">Sourcing Records</option>
+                      <option value="nego-records">Nego Records</option>
+                      <option value="sourcing-productivity">Sourcing Productivity</option>
+                      <option value="nego-productivity">Nego Productivity</option>
+                    </select>
+                  </div>
+                  <div class="field-col flex-1" id="editorTableWrap">
+                    <label for="editorTable" class="eyebrow">Table</label>
+                    <select id="editorTable" class="select">
+                      <option value="">Select table…</option>
+                    </select>
+                  </div>
+                  <div class="field-col">
+                    <label for="editorDateCol" class="eyebrow">Date column</label>
+                    <select id="editorDateCol" class="select"><option value="">No date filter</option></select>
+                  </div>
+                  <div class="field-col">
+                    <label for="editorFrom" class="eyebrow">From</label>
+                    <input type="date" id="editorFrom" class="input" />
+                  </div>
+                  <div class="field-col">
+                    <label for="editorTo" class="eyebrow">To</label>
+                    <input type="date" id="editorTo" class="input" />
+                  </div>
+                </div>
+
+                <div class="editor-cols">
+                  <div class="editor-cols-head">
+                    <label for="editorColSearch" class="eyebrow">Columns to load</label>
+                    <div class="editor-cols-actions">
+                      <input type="text" id="editorColSearch" class="input" placeholder="Filter columns…" />
+                      <button class="btn ghost sm" id="btnEditorColsAll">Select all</button>
+                      <button class="btn ghost sm" id="btnEditorColsNone">Clear</button>
+                    </div>
+                  </div>
+                  <div class="editor-col-list" id="editorColList">
+                    <p class="muted">Connect to Dataverse, then choose a record set to list its columns.</p>
+                  </div>
+                </div>
+
+                <div class="editor-actions">
+                  <span class="mono-meta" id="editorColCount">0 columns selected</span>
+                  <button class="btn primary" id="btnEditorLoad" disabled>Load records</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- ============ RECORDS EDITOR: RESULTS ============ -->
+        <section class="view" id="view-editor-results">
+          <div class="ws-head">
+            <div class="ws-head-left">
+              <button class="btn ghost" id="btnEditorBack">← Load options</button>
+              <h1 id="editorResultsTitle">Records</h1>
+              <span class="mono-meta" id="editorCount">Nothing loaded</span>
+            </div>
+            <div class="ws-head-right">
+              <span class="editor-dirty hidden" id="editorDirty"></span>
+              <button class="btn ghost" id="btnEditorClearFilters" disabled>Clear filters</button>
+              <button class="btn ghost" id="btnEditorDiscard" disabled>Discard changes</button>
+              <button class="btn primary" id="btnEditorSave" disabled>Save to Dataverse</button>
+            </div>
+          </div>
+          <div class="table-wrap flex-table" id="editorWrap">
+            <div class="empty" id="editorEmpty"><span class="ico empty-ico" data-icon="grid"></span><p>Choose your columns and date range, then load records to edit them.</p></div>
+            <table id="editorTableGrid" class="hidden"><thead></thead><tbody></tbody></table>
+          </div>
+        </section>
+
         <section class="view" id="view-explorer">
           <div class="stack">
             <div class="ws-head">
@@ -780,5 +876,6 @@
   <script src="icons.js?v=20260909e"></script>
   <script src="app.js?v=20260910j"></script>
   <script src="shell.js?v=20260914a"></script>
+  <script src="editor.js?v=20260914a"></script>
 </body>
 </html>

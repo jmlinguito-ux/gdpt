@@ -88,6 +88,10 @@ class Api:
         self._pending_ref_sync: dict | None = None    # staged team/municipality/mapping upsert plan
         self._existing_keys_cache: dict | None = None  # {target, keys, ts} reused by publish right after validate
         self.existing_records: list[dict] = []
+        # Editable grids over published Dataverse data, keyed by scope
+        # ('existing' / 'productivity'). Edits stage here until an explicit Save.
+        self.editors: dict[str, dict] = {}
+        self.editor_active_scope: str = ''
         # cap for the viewer-only prefetch of existing records (see fetch_dataverse_tables)
 
         self.existing_area_set: set[str] = set()
@@ -700,6 +704,215 @@ class Api:
             return data
         except Exception as exc:  # noqa: BLE001
             return self._err(exc)
+
+    # -- editable Dataverse grids (existing records / productivity) --------
+    # Edits are staged locally and written only on an explicit Save, unlike the
+    # reference tables which sync each cell live. These grids sit on published
+    # data, so an accidental keystroke must not reach Dataverse on its own.
+
+    # Each scope maps to the two tokens a table's logical name must contain.
+    # Real names look like cr63f_<province><nego|sourcing><record|productivity>,
+    # so the pair identifies the bucket without ambiguity.
+    _EDITOR_SCOPES = {
+        'sourcing-records': ('sourcing', 'record'),
+        'nego-records': ('nego', 'record'),
+        'sourcing-productivity': ('sourcing', 'productivity'),
+        'nego-productivity': ('nego', 'productivity'),
+    }
+
+    @staticmethod
+    def _editor_pref_key(scope: str) -> str:
+        """Editor-only remembered table, deliberately separate from the pipeline's
+        <mode>_record_table / <mode>_productivity_table: browsing a table here must
+        never repoint where stage 4/5 publishes."""
+        return 'editor_table_' + str(scope or '').replace('-', '_')
+
+    def _configured_solution(self) -> str:
+        cfg = (self.dv_client.config if (self.dv_client and self.dv_client.config) else {}) or {}
+        return (cfg.get('solution_id') or self.ui_settings.get('solution_id')
+                or cfg.get('solution_name') or self.ui_settings.get('solution_name') or '').strip()
+
+    def _editor_table_name(self, scope: str, table: str = '') -> str:
+        """Logical table for a scope: whatever was picked, else the one remembered."""
+        chosen = (table or '').strip()
+        if chosen:
+            return chosen
+        return str(self.ui_settings.get(self._editor_pref_key(scope)) or '').strip()
+
+    def get_editor_tables(self, scope: str):
+        """Tables in the configured solution that belong to this scope."""
+        if not (self.dv_client and self.dv_client.signed_in()):
+            return self._err('Connect to Dataverse first.')
+        tokens = self._EDITOR_SCOPES.get(scope)
+        if not tokens:
+            return self._err(f'Unknown record set: {scope}')
+        kind, kind_type = tokens
+        try:
+            tables = self.dv_client.get_solution_tables(self._configured_solution() or None) or []
+            matches = []
+            for t in tables:
+                logical = str((t or {}).get('logicalName') or '').lower()
+                if kind in logical and kind_type in logical:
+                    matches.append({'logicalName': t.get('logicalName'),
+                                    'displayName': t.get('displayName') or t.get('logicalName')})
+            matches.sort(key=lambda t: (t['displayName'] or '').lower())
+            return {'ok': True, 'scope': scope, 'tables': matches,
+                    'saved': self._editor_table_name(scope), 'mode': self.mode}
+        except Exception as exc:  # noqa: BLE001
+            return self._err(exc)
+
+    def _editor(self, scope: str) -> dict:
+        return self.editors.setdefault(scope, {'table': '', 'columns': [], 'labels': [], 'types': {},
+                                               'choices': {}, 'rows': [], 'dirty': {}, 'loaded': False})
+
+    def get_editor_load_options(self, scope: str, table: str = ''):
+        """Column + date-range choices for the load dialog."""
+        if not (self.dv_client and self.dv_client.signed_in()):
+            return self._err('Connect to Dataverse first.')
+        logical = self._editor_table_name(scope, table)
+        if not logical:
+            return self._err('Choose a table to load first.')
+        try:
+            opts = self.dv_client.get_table_load_options(logical)
+            prefs = self.ui_settings.get('editor_prefs', {}).get(scope, {})
+            opts['savedColumns'] = prefs.get('columns') or []
+            opts['savedDateColumn'] = prefs.get('dateColumn') or opts.get('defaultDateColumn') or ''
+            opts['savedFrom'] = prefs.get('dateFrom') or ''
+            opts['savedTo'] = prefs.get('dateTo') or ''
+            opts['scope'] = scope
+            return opts
+        except Exception as exc:  # noqa: BLE001
+            return self._err(exc)
+
+    def load_editor_records(self, scope: str, table: str = '', columns: list | None = None,
+                            date_column: str = '', date_from: str = '', date_to: str = '',
+                            limit: int | None = None):
+        if not (self.dv_client and self.dv_client.signed_in()):
+            return self._err('Connect to Dataverse first.')
+        logical = self._editor_table_name(scope, table)
+        if not logical:
+            return self._err('Choose a table to load first.')
+        ed = self._editor(scope)
+        if ed['dirty']:
+            return self._err('Save or discard your pending edits before loading again.')
+
+        def worker():
+            try:
+                data = self.dv_client.load_table_records(
+                    logical, list(columns or []), date_column or '',
+                    date_from or '', date_to or '', limit)
+                ed.update({'table': logical, 'columns': data['columns'], 'labels': data['labels'],
+                           'types': data.get('types', {}), 'choices': data.get('choices', {}),
+                           'rows': data['rows'], 'dirty': {}, 'loaded': True})
+                # The shared grid layer calls updateCell with (row, col, val) only,
+                # so the scope on screen is tracked here rather than passed in.
+                self.editor_active_scope = scope
+                prefs = self.ui_settings.setdefault('editor_prefs', {}).setdefault(scope, {})
+                prefs.update({'columns': data['columns'], 'dateColumn': date_column or '',
+                              'dateFrom': date_from or '', 'dateTo': date_to or ''})
+                self.ui_settings[self._editor_pref_key(scope)] = logical
+                self._write_settings()
+                scoped = 'in range' if data.get('filtered') else 'unfiltered'
+                self._done(f"Loaded {data['count']} record{'' if data['count'] == 1 else 's'} "
+                           f"({len(data['columns'])} columns, {scoped}).",
+                           table=self._editor_table(scope))
+            except Exception as exc:  # noqa: BLE001
+                self._done(str(exc), error=True, refresh=False)
+
+        return self._async(worker)
+
+    def _editor_table(self, scope: str) -> dict:
+        ed = self._editor(scope)
+        return {
+            'kind': f'editor:{scope}', 'scope': scope, 'table': ed['table'],
+            'columns': ed['columns'], 'labels': ed['labels'], 'types': ed['types'],
+            'choices': ed.get('choices', {}),
+            'rows': [[r.get(c, '') for c in ed['columns']] for r in ed['rows']],
+            'dirty': {f'{ri}:{ci}': True
+                      for ri, cols in ed['dirty'].items()
+                      for ci in [ed['columns'].index(c) for c in cols if c in ed['columns']]},
+            'dirtyCount': sum(len(v) for v in ed['dirty'].values()),
+            'count': len(ed['rows']), 'loaded': ed['loaded'],
+        }
+
+    def get_editor_table(self, scope: str):
+        return self._ok(table=self._editor_table(scope))
+
+    def update_editor_cell(self, scope: str, row_index: int, column: str, value: str):
+        """Stage one cell edit locally. Nothing reaches Dataverse until save."""
+        ed = self._editor(scope)
+        if not (0 <= row_index < len(ed['rows'])):
+            return self._err('Row index out of range.')
+        if column not in ed['columns']:
+            return self._err(f'Unknown column: {column}')
+        val = '' if value is None else str(value).strip()
+        label = ed['labels'][ed['columns'].index(column)] if ed['labels'] else column
+        # Same date rule the CSV and productivity workspaces enforce. Only date
+        # columns get it: date_cell_error assumes its caller already checked.
+        reason = pt.date_cell_error(label, val) if pt.is_date_column(label) else ''
+        if reason:
+            return self._err(f"'{label}': {val} {reason}.")
+        row = ed['rows'][row_index]
+        original = row.get(f'_orig_{column}', row.get(column, ''))
+        row.setdefault(f'_orig_{column}', row.get(column, ''))
+        row[column] = val
+        pending = ed['dirty'].setdefault(row_index, {})
+        if val == original:
+            pending.pop(column, None)
+            if not pending:
+                ed['dirty'].pop(row_index, None)
+        else:
+            pending[column] = val
+        return self._ok(table=self._editor_table(scope))
+
+    def update_editor_cell_active(self, row_index: int, column: str, value: str):
+        """3-argument form the shared grid layer calls (it has no scope to pass)."""
+        return self.update_editor_cell(getattr(self, 'editor_active_scope', '') or '', row_index, column, value)
+
+    def discard_editor_edits(self, scope: str):
+        ed = self._editor(scope)
+        for ri, cols in ed['dirty'].items():
+            for col in cols:
+                key = f'_orig_{col}'
+                if key in ed['rows'][ri]:
+                    ed['rows'][ri][col] = ed['rows'][ri].pop(key)
+        ed['dirty'] = {}
+        return self._ok(table=self._editor_table(scope), message='Pending edits discarded.')
+
+    def save_editor_edits(self, scope: str):
+        if not (self.dv_client and self.dv_client.signed_in()):
+            return self._err('Connect to Dataverse first.')
+        ed = self._editor(scope)
+        if not ed['dirty']:
+            return self._err('No pending edits to save.')
+
+        def worker():
+            try:
+                updates = []
+                order = []
+                for ri, cols in ed['dirty'].items():
+                    row = ed['rows'][ri]
+                    updates.append({'_record_id': row.get('_record_id'), 'fields': dict(cols),
+                                    'label': row.get(ed['columns'][0], '') if ed['columns'] else f'Row {ri + 1}'})
+                    order.append(ri)
+                res = self.dv_client.update_records_fields_batch(ed['table'], updates)
+                failures = [r for r in res.get('results', []) if r.get('status') != 'updated']
+                # Only clear the rows Dataverse confirmed; failures stay dirty so
+                # they are not silently lost.
+                for pos, ri in enumerate(order):
+                    status = res['results'][pos].get('status') if pos < len(res.get('results', [])) else 'failed'
+                    if status == 'updated':
+                        for col in list(ed['dirty'].get(ri, {})):
+                            ed['rows'][ri].pop(f'_orig_{col}', None)
+                        ed['dirty'].pop(ri, None)
+                msg = f"Saved {res.get('updated', 0)} record{'' if res.get('updated') == 1 else 's'}."
+                if failures:
+                    msg += f" {len(failures)} failed: {failures[0].get('error') or 'unknown error'}"
+                self._done(msg, error=bool(failures), table=self._editor_table(scope))
+            except Exception as exc:  # noqa: BLE001
+                self._done(str(exc), error=True, refresh=False)
+
+        return self._async(worker)
 
     # -- per-source reference loading -------------------------------------
     _REF_ATTR = {

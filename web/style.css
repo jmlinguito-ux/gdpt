@@ -1166,3 +1166,65 @@ td.cell-selected.cell-invalid {
 td.cell-active.cell-invalid {
   box-shadow: inset 0 0 0 1.5px var(--bad), inset 0 0 0 4.5px var(--accent) !important;
 }
+
+/* ---------------------------------------------------------------------------
+   Records editor — scoped loading + staged edits over published Dataverse rows
+   --------------------------------------------------------------------------- */
+.editor-toolbar {
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-bottom: 14px;
+}
+.editor-toolbar .field-col { min-width: 150px; }
+.editor-toolbar .flex-1 { flex: 1 1 220px; }
+
+.editor-cols { border-top: 1px solid var(--line); padding-top: 12px; }
+.editor-cols-head {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 10px; margin-bottom: 8px;
+}
+.editor-cols-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.editor-cols-actions .input { min-width: 160px; }
+
+.editor-col-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 12px; max-height: 220px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+  background: var(--bg2, transparent);
+}
+.editor-col {
+  display: flex; align-items: center; gap: 8px; padding: 3px 4px;
+  border-radius: 6px; cursor: pointer; min-width: 0;
+}
+.editor-col:hover { background: var(--accent-soft); }
+.editor-col-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-col-type {
+  font-family: var(--mono); font-size: 10px; color: var(--ink3);
+  text-transform: lowercase; flex: none;
+}
+
+.editor-actions {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-top: 14px; flex-wrap: wrap;
+}
+
+.editor-dirty {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+  color: var(--warn); background: var(--warn-soft);
+  border: 1px solid var(--warn-line); border-radius: 999px; padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.editor-cell { cursor: cell; }
+.editor-cell:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* A staged edit is visually distinct until it is actually written to Dataverse. */
+.editor-cell.is-dirty {
+  background: var(--warn-soft); box-shadow: inset 2px 0 0 var(--warn); font-weight: 600;
+}
+.editor-input {
+  width: 100%; border: 1px solid var(--accent); border-radius: 4px;
+  padding: 2px 6px; font: inherit; background: var(--bg); color: var(--ink);
+}
+
+@media (max-width: 720px) {
+  .editor-toolbar .field-col { min-width: 100%; }
+  .editor-col-list { grid-template-columns: 1fr; max-height: 180px; }
+}
