@@ -53,8 +53,9 @@ jobs:
             throw "Invalid version '$version'. Use a semantic version such as 1.0.0."
           }
           $tag = "v$version"
-          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
-          if ($LASTEXITCODE -eq 0) {
+          $existingTags = @(gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --json tagName |
+            ConvertFrom-Json | ForEach-Object { $_.tagName })
+          if ($existingTags -contains $tag) {
             throw "Release $tag already exists. Choose a new version."
           }
           "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
