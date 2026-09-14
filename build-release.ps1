@@ -31,7 +31,10 @@ New-Item -ItemType Directory -Force -Path $generatedDirectory | Out-Null
 
 $env:GDPT_UPDATE_CONFIG = $generatedConfig
 try {
-    & py -m PyInstaller --clean --noconfirm (Join-Path $projectDirectory 'Ground-Data-Processing-Tool.spec')
+    # Use the interpreter selected by the environment (including setup-python
+    # on GitHub Actions). The Windows `py` launcher can resolve to a different
+    # installation that does not contain the build dependencies.
+    & python -m PyInstaller --clean --noconfirm (Join-Path $projectDirectory 'Ground-Data-Processing-Tool.spec')
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE." }
 } finally {
     Remove-Item Env:GDPT_UPDATE_CONFIG -ErrorAction SilentlyContinue
