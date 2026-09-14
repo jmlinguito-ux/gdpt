@@ -74,9 +74,17 @@ class UpdateServiceTests(unittest.TestCase):
             "https://github.com/jmlinguito-ux/gdpt/releases/latest/download/",
         )
 
-    def test_http_source_is_passed_directly_to_update_manager(self):
+    def test_http_feed_is_wrapped_in_http_source(self):
+        # A bare URL string is auto-detected as a GitHub API source whenever the
+        # host is github.com, which rewrites the static feed path into an
+        # invalid REST URL and fails with a 404. The feed must reach Velopack as
+        # an explicit HttpSource instead.
         feed = "https://github.com/example/app/releases/latest/download"
         seen = []
+
+        class Source:
+            def __init__(self, url):
+                self.url = url
 
         class Manager:
             def __init__(self, source):
@@ -85,13 +93,15 @@ class UpdateServiceTests(unittest.TestCase):
             def get_current_version(self):
                 return "1.0.1"
 
-        fake_module = SimpleNamespace(UpdateManager=Manager)
+        fake_module = SimpleNamespace(UpdateManager=Manager, HttpSource=Source)
         with mock.patch("updater.load_update_config", return_value={
             "version": "1.0.1", "source": "http", "url": feed
         }), mock.patch.dict(sys.modules, {"velopack": fake_module}):
             service = UpdateService(lambda _state: None)
 
-        self.assertEqual(seen, [feed + "/"])
+        self.assertEqual(len(seen), 1)
+        self.assertIsInstance(seen[0], Source)
+        self.assertEqual(seen[0].url, feed)
         self.assertEqual(service.state()["currentVersion"], "1.0.1")
 
 

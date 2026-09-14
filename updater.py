@@ -65,12 +65,13 @@ class UpdateService:
             if source_type == "github":
                 source = velopack.GithubSource(url, None, bool(self._config.get("prerelease", False)))
             else:
-                # A plain HTTPS URL selects Velopack's static web source. This
-                # avoids GitHub's anonymous REST API (60 requests/hour/IP).
-                # Keep the trailing slash: URL resolution otherwise treats the
-                # final path component as a file and drops "download" when
-                # Velopack appends releases.<channel>.json.
-                source = f"{url.rstrip('/')}/"
+                # Wrap the feed URL in HttpSource explicitly so Velopack uses
+                # its static web source. A bare string is auto-detected as a
+                # GitHub API source whenever the host is github.com, which
+                # rewrites the feed path into an invalid REST URL and fails
+                # with a 404. HttpSource also avoids GitHub's anonymous REST
+                # API limit (60 requests/hour/IP).
+                source = velopack.HttpSource(url)
             manager = velopack.UpdateManager(source)
             current = manager.get_current_version()
             if current:
