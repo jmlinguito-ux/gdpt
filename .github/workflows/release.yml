@@ -1,0 +1,121 @@
+name: Release Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version number without the v prefix, for example 1.0.0
+        required: true
+        type: string
+      release_notes:
+        description: Notes shown in GitHub and in the app's update prompt
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION.Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+            throw "Invalid version '$version'. Use a semantic version such as 1.0.0."
+          }
+          $tag = "v$version"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $tag already exists. Choose a new version."
+          }
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+          dotnet tool install --global vpk --version 1.2.0
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -v
+          python -m py_compile app.py app_paths.py updater.py dataverse.py productivity_tool.py
+          node --check web/app.js
+          node --check web/shell.js
+
+      - name: Download previous release for delta generation
+        shell: pwsh
+        run: |
+          $releaseCount = [int](gh release list --repo $env:GITHUB_REPOSITORY --limit 1 --json tagName --jq 'length')
+          if ($releaseCount -gt 0) {
+            vpk download github --repoUrl "https://github.com/$env:GITHUB_REPOSITORY" --channel win --outputDir Releases --token $env:GH_TOKEN
+            # Previous packages are retained for delta generation. Old installers
+            # are removed so they cannot be attached to the new GitHub release.
+            Get-ChildItem -LiteralPath Releases -File | Where-Object {
+              $_.Extension -in '.exe', '.zip'
+            } | Remove-Item -Force
+          } else {
+            New-Item -ItemType Directory -Force -Path Releases | Out-Null
+            Write-Host 'No previous release found; creating the first full package.'
+          }
+
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          $notes = $env:RELEASE_NOTES_INPUT.Trim()
+          if (-not $notes) {
+            $notes = "Ground Data Processing Tool $env:RELEASE_VERSION"
+          }
+          Set-Content -LiteralPath release-notes.md -Value $notes -Encoding utf8
+
+      - name: Build installer and update packages
+        shell: pwsh
+        run: |
+          .\build-release.ps1 -Version $env:RELEASE_VERSION -ReleaseNotes .\release-notes.md
+
+      - name: Publish GitHub release
+        shell: pwsh
+        run: |
+          $versionPattern = '(^|[-_])' + [regex]::Escape($env:RELEASE_VERSION) + '([-_.]|$)'
+          $assets = @(Get-ChildItem -LiteralPath Releases -File | Where-Object {
+            $_.Name -eq 'releases.win.json' -or
+            $_.Name -match $versionPattern -or
+            $_.Name -match '(?i)setup|portable'
+          } | ForEach-Object { $_.FullName })
+          if ($assets.Count -eq 0) { throw 'Velopack produced no release assets.' }
+          gh release create $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Ground Data Processing Tool $env:RELEASE_VERSION" --notes-file release-notes.md
+          $url = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json url --jq '.url'
+          "### Published [$env:RELEASE_TAG]($url)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

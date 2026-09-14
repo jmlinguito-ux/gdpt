@@ -162,6 +162,22 @@ key when you edit those files.
 Velopack packages the PyInstaller `--onedir` output, generates a per-user Windows
 installer, and creates full and delta update packages. Install the prerequisites once:
 
+### Recommended: build and publish on GitHub
+
+The repository includes `.github/workflows/release.yml`. To publish a release:
+
+1. Open the repository's **Actions** tab.
+2. Select **Release Windows installer**.
+3. Choose **Run workflow**.
+4. Enter a new version such as `1.0.0` and optional release notes.
+
+The workflow validates the version, runs the tests, downloads the previous package
+when available, generates full and delta update packages, and publishes a GitHub
+Release. It uses GitHub's short-lived workflow token; no personal access token or
+repository secret is required.
+
+### Optional: build locally
+
 ```powershell
 py -m pip install -r requirements-build.txt
 dotnet tool install -g vpk --version 1.2.0
