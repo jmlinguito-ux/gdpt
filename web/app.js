@@ -1166,6 +1166,10 @@ function validateCellValue(val, meta, header) {
     if (isInvalidDateVal(s)) {
       return { valid: false, error: `'${header}': Invalid date format "${s}". Expected MM/DD/YYYY.` };
     }
+    // Negotiation and sourcing record work already done, so a future value is a typo.
+    if (isNoFutureDateColumn(header) && isFutureDateVal(s)) {
+      return { valid: false, error: `'${header}': "${s}" is in the future. ${header} cannot be later than today.` };
+    }
   }
 
   // 5. Choices / Picklists
@@ -2222,6 +2226,22 @@ function isInvalidDateVal(val) {
 function isDateColumn(headerName) {
   const norm = String(headerName || '').trim().toUpperCase();
   return ['NEGO DATE', 'REPORT DATE', 'SOURCING DATE', 'DATE UPLOADED', 'DATE EXTRACTED', 'NEXT CALL DATE'].includes(norm);
+}
+
+// Mirrors NO_FUTURE_DATE_COLUMNS in productivity_tool.py - keep both in step.
+// NEXT CALL DATE is excluded on purpose: it is supposed to be ahead of today.
+function isNoFutureDateColumn(headerName) {
+  const norm = String(headerName || '').trim().toUpperCase();
+  return ['NEGO DATE', 'SOURCING DATE', 'REPORT DATE'].includes(norm);
+}
+
+function isFutureDateVal(val) {
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(val || '').trim());
+  if (!match) return false;
+  const dt = new Date(Number(match[3]), Number(match[1]) - 1, Number(match[2]));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return dt.getTime() > today.getTime();
 }
 
 function isCalculatedColumn(headerName) {

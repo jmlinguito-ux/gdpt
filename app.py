@@ -1555,8 +1555,9 @@ class Api:
                 if invalid:
                     first = invalid[0]
                     self._done(f"Fix {len(invalid)} invalid date value{'' if len(invalid) == 1 else 's'} before "
-                                f"generating productivity. Dates need MM/DD/YYYY (e.g. 08/10/2026). First issue: row {first['row']}, "
-                                f"{first['column']} = {first['value']}.", error=True, refresh=False)
+                                f"generating productivity. First issue: row {first['row']}, "
+                                f"{first['column']} = {first['value']} — {first['reason']}.",
+                                error=True, refresh=False)
                     return
                 # NOTE: Build work-week mismatches do NOT block here — the UI warns
                 # and asks the user to confirm before calling generate.
@@ -1741,8 +1742,9 @@ class Api:
             for k, v in row.items():
                 if pt.is_date_column(k):
                     val = str(v or '').strip()
-                    if val and not pt.is_valid_mm_dd_yyyy(pt.format_date_to_mm_dd_yyyy(val)):
-                        bad.append(f"{k} = '{val}'")
+                    reason = pt.date_cell_error(k, val)
+                    if reason:
+                        bad.append(f"{k} = '{val}' ({reason})")
             if bad:
                 hard_errors.append({'row': row_num, 'label': label, 'issues': bad})
                 continue

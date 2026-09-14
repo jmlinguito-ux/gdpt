@@ -81,6 +81,11 @@ REQUIRED_COLUMNS_BY_MODE = {
 
 EXPLICITLY_NORMALIZED_DATE_COLUMNS = {'REPORT DATE', 'DATE UPLOADED', 'DATE EXTRACTED'}
 
+# Dates recording work that already happened, so a future value is a typo rather
+# than a plan. NEXT CALL DATE is deliberately absent: it is the one date column
+# meant to be ahead of today.
+NO_FUTURE_DATE_COLUMNS = {'NEGO DATE', 'SOURCING DATE', 'REPORT DATE'}
+
 # Mapping-status key -> label maps (from generated/models/mappingstatus-model.ts)
 MAPPING_STATUS_DATA_USABILITY_LABEL = {'DataUsability': 'Data Usability', 'VALID': 'VALID', 'INVALID': 'INVALID'}
 MAPPING_STATUS_LABEL = {
@@ -280,16 +285,47 @@ def normalize_csv_date_columns(row: dict) -> dict:
     return {k: (format_date_to_mm_dd_yyyy(v) if is_date_column(k) else v) for k, v in row.items()}
 
 
+def is_future_date(value: str) -> bool:
+    """True when a valid MM/DD/YYYY value falls after today (local date)."""
+    m = re.match(r'^(\d{2})/(\d{2})/(\d{4})$', value or '')
+    if not m:
+        return False
+    try:
+        parsed = datetime(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    except ValueError:
+        return False
+    return parsed.date() > datetime.now().date()
+
+
+def date_cell_error(column: str, value) -> str:
+    """Why a date cell is unusable, or '' when it is fine.
+
+    Shared by the pre-generate and pre-publish checks so both enforce one rule.
+    """
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    formatted = format_date_to_mm_dd_yyyy(raw)
+    if not is_valid_mm_dd_yyyy(formatted):
+        return 'needs MM/DD/YYYY (e.g. 08/10/2026)'
+    if column.strip().upper() in NO_FUTURE_DATE_COLUMNS and is_future_date(formatted):
+        return 'cannot be a future date'
+    return ''
+
+
 def get_invalid_date_cells(rows: list[dict], columns: list[str]) -> list[dict]:
-    """Port of getInvalidDateCells: any non-empty date cell that isn't valid MM/DD/YYYY."""
+    """Port of getInvalidDateCells: any non-empty date cell that isn't valid
+    MM/DD/YYYY, plus nego/sourcing dates that fall after today."""
     invalid = []
     for index, row in enumerate(rows):
         for column in columns:
             if not is_date_column(column):
                 continue
             value = str(row.get(column, '') or '').strip()
-            if value and not is_valid_mm_dd_yyyy(format_date_to_mm_dd_yyyy(value)):
-                invalid.append({'row': index + 1, 'column': column, 'value': value})
+            reason = date_cell_error(column, value)
+            if reason:
+                invalid.append({'row': index + 1, 'column': column,
+                                'value': value, 'reason': reason})
     return invalid
 
 
