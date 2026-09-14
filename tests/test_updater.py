@@ -74,6 +74,26 @@ class UpdateServiceTests(unittest.TestCase):
             "https://github.com/jmlinguito-ux/gdpt/releases/latest/download/",
         )
 
+    def test_unmanaged_build_is_disabled_not_an_error(self):
+        # Running from source or the PyInstaller dist folder is not an install,
+        # so Velopack raises here. That is expected, not a failure to report.
+        class Manager:
+            def __init__(self, source):
+                raise RuntimeError("This application is not properly installed")
+
+        fake_module = SimpleNamespace(UpdateManager=Manager, HttpSource=lambda url: url)
+        with mock.patch("updater.load_update_config", return_value={
+            "version": "1.0.5", "source": "http",
+            "url": "https://github.com/example/app/releases/latest/download/",
+        }), mock.patch.dict(sys.modules, {"velopack": fake_module}):
+            service = UpdateService(lambda _state: None)
+
+        self.assertFalse(service.state()["active"])
+        self.assertEqual(service.state()["currentVersion"], "1.0.5")
+        state = service.check(True)
+        self.assertEqual(state["status"], "disabled")
+        self.assertNotIn("not properly installed", state["message"])
+
     def test_http_feed_is_wrapped_in_http_source(self):
         # A bare URL string is auto-detected as a GitHub API source whenever the
         # host is github.com, which rewrites the static feed path into an

@@ -51,6 +51,10 @@ class UpdateService:
         self._state = {
             "status": "idle",
             "configured": bool((self._config.get("url") or "").strip()),
+            # False for builds Velopack cannot manage (running from source, the
+            # PyInstaller dist folder, or a portable copy). Not an error state:
+            # those builds are updated by reinstalling, not in-app.
+            "active": False,
             "currentVersion": str(self._config.get("version") or DEFAULT_VERSION),
             "latestVersion": "",
             "releaseNotes": "",
@@ -82,10 +86,13 @@ class UpdateService:
             if current:
                 self._state["currentVersion"] = str(current)
             self._manager = manager
+            self._state["active"] = True
         except ImportError:
-            self._state["message"] = "Updater support is unavailable in this development build."
-        except Exception as exc:  # Velopack reports portable/unmanaged builds here.
-            self._state["message"] = f"Updater is not active: {exc}"
+            self._state["message"] = "Updater support is not bundled in this development build."
+        except Exception:  # Velopack reports portable/unmanaged builds here.
+            self._state["message"] = (
+                "This build is not an installed release, so in-app updates are disabled."
+            )
 
     def state(self) -> dict:
         with self._lock:
@@ -105,7 +112,9 @@ class UpdateService:
         if not self._state["configured"]:
             return self._set(status="disabled", message="Update feed is not configured in this build.")
         if self._manager is None:
-            return self._set(status="error", message=self._state["message"] or "Updater is unavailable.")
+            # Not an error: this build simply cannot update itself in place.
+            return self._set(status="disabled",
+                             message=self._state["message"] or "Updates are unavailable in this build.")
         with self._lock:
             if self._busy:
                 return dict(self._state)

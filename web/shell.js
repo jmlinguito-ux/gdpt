@@ -253,9 +253,11 @@
     setText('updateLatest', u.latestVersion ? 'Latest: ' + u.latestVersion : '');
 
     const hint = $('updateHint');
-    if (hint) hint.textContent = u.configured
-      ? 'Updates are checked automatically when the app starts.'
-      : 'Set an update URL when creating the release build.';
+    if (hint) {
+      if (!u.configured) hint.textContent = 'Set an update URL when creating the release build.';
+      else if (u.active === false) hint.textContent = 'Install a release build to receive updates in the app.';
+      else hint.textContent = 'Updates are checked automatically when the app starts.';
+    }
 
     const dot = $('updateDot');
     if (dot) {
@@ -277,7 +279,7 @@
 
     const busy = ['checking', 'downloading', 'installing'].includes(status);
     const check = $('btnCheckUpdate');
-    if (check) { check.disabled = busy || !u.configured; check.textContent = status === 'checking' ? 'Checking…' : 'Check for updates'; }
+    if (check) { check.disabled = busy || !u.configured || u.active === false; check.textContent = status === 'checking' ? 'Checking…' : 'Check for updates'; }
     const download = $('btnDownloadUpdate');
     if (download) download.classList.toggle('hidden', status !== 'available');
     const install = $('btnInstallUpdate');
