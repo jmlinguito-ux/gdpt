@@ -929,7 +929,8 @@ tr.row-invalid-date:hover td {
 }
 
 #refTable { width: 100% !important; min-width: 100% !important; table-layout: fixed; }
-#refTable th.col-action, #refTable td.col-action { width: 54px !important; min-width: 54px !important; max-width: 54px !important; }
+#refTable th.col-action, #refTable td.col-action { width: 54px !important; min-width: 54px !important; max-width: 54px !important; text-align: center; }
+#editorTableGrid th.col-action, #editorTableGrid td.col-action { width: 48px !important; min-width: 48px !important; max-width: 48px !important; text-align: center; padding: 0 !important; }
 
 /* ---------- dashboard ---------- */
 .db-filter-bar {

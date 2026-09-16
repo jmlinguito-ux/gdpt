@@ -47,13 +47,47 @@ except Exception:  # noqa: BLE001
 
 # Single source of truth: the single-instance check finds the running window by
 # this exact title, so both uses must stay derived from the same string.
-APP_TITLE = f'Ground Data Processing Tool v{app_version()}'
+APP_TITLE = 'Ground Data Processing Tool'
 
 
 def _resource_dir() -> str:
     # PyInstaller unpacks bundled data to sys._MEIPASS
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, 'web')
+
+
+def _index_url() -> str:
+    """URL the UI window opens.
+
+    pywebview serves local files from a *fixed* port when the profile is
+    persistent (see storage_path in main()), so the page and its assets live at
+    stable URLs and Chromium happily re-serves the copy it cached on a previous
+    launch. index.html is the dangerous one: a stale copy still points at the old
+    ?v= asset URLs, so a rebuilt UI (new ACT column, new buttons) can stay
+    invisible no matter what is on disk. Stamping the file's mtime onto the URL
+    gives every rebuilt page a new cache key, so the shell is always re-read.
+    """
+    index_html = os.path.join(_resource_dir(), 'index.html')
+    try:
+        stamp = int(os.path.getmtime(index_html))
+    except OSError:
+        stamp = 0
+    return f'{index_html}?v={stamp}'
+
+
+def _disable_webview_disk_cache() -> None:
+    """Stop WebView2 persisting responses at all.
+
+    Belt and braces for the cache behind _index_url(): even if an asset version
+    bump is forgotten, a stale file can no longer outlive a build. The profile
+    itself is kept (localStorage, theme, column widths) - only the disk cache is
+    neutered. Honours any arguments the environment already sets.
+    """
+    key = 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'
+    existing = os.environ.get(key, '')
+    if 'disk-cache-size' in existing:
+        return
+    os.environ[key] = (existing + ' --disk-cache-size=1').strip()
 
 
 def _app_base_dir() -> str:
@@ -868,6 +902,43 @@ class Api:
     def update_editor_cell_active(self, row_index: int, column: str, value: str):
         """3-argument form the shared grid layer calls (it has no scope to pass)."""
         return self.update_editor_cell(getattr(self, 'editor_active_scope', '') or '', row_index, column, value)
+
+    def delete_editor_row(self, scope: str, row_index: int):
+        """Delete one published row. Unlike the reference tables, the row is only
+        dropped once Dataverse confirms the delete: these are live records, so a
+        local-only removal would leave the two out of step without warning."""
+        try:
+            ed = self._editor(scope)
+            if not (0 <= row_index < len(ed['rows'])):
+                return self._err('Row index out of range.')
+            row = ed['rows'][row_index]
+            record_id = row.get('_record_id')
+            table_name = row.get('_entity_logical') or ed.get('table')
+            synced = False
+            sync_msg = ''
+            if self.dv_client and self.dv_client.signed_in() and record_id and table_name:
+                try:
+                    self.dv_client.delete_record(table_name, record_id)
+                    synced = True
+                    sync_msg = 'Record deleted from Dataverse.'
+                except Exception as dv_exc:
+                    return self._err(f'Failed to delete from Dataverse: {dv_exc}')
+            elif record_id:
+                sync_msg = 'Removed from this list only — Dataverse was not updated.'
+            else:
+                sync_msg = 'Removed from this list only (no Dataverse record id).'
+
+            ed['rows'].pop(row_index)
+            new_dirty = {}
+            for ri, cols in ed['dirty'].items():
+                if ri < row_index:
+                    new_dirty[ri] = cols
+                elif ri > row_index:
+                    new_dirty[ri - 1] = cols
+            ed['dirty'] = new_dirty
+            return self._ok(table=self._editor_table(scope), synced=synced, msg=sync_msg or 'Record deleted.')
+        except Exception as exc:  # noqa: BLE001
+            return self._err(exc)
 
     def discard_editor_edits(self, scope: str):
         ed = self._editor(scope)
@@ -2647,8 +2718,7 @@ def main():
         sys.exit(0)
 
     api = Api()
-    index_html = os.path.join(_resource_dir(), 'index.html')
-    window = webview.create_window(APP_TITLE, index_html, js_api=api,
+    window = webview.create_window(APP_TITLE, _index_url(), js_api=api,
                                    width=1400, height=860, min_size=(1400, 860))
 
     def _force_exit():
@@ -2663,6 +2733,7 @@ def main():
 
     # persistent WebView2 profile -> faster warm starts and asset caching
     storage = os.path.join(_app_base_dir(), '.webview')
+    _disable_webview_disk_cache()
     try:
         os.makedirs(storage, exist_ok=True)
         webview.start(private_mode=False, storage_path=storage)

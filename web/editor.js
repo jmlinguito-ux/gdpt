@@ -20,6 +20,9 @@
   const TABLE_ID = 'editorTableGrid';
   const TABLE_KEY = 'editor';
   const MAX_RENDER = 2000;
+  // The pinned ACT column that holds the per-row delete button. Keep in step with
+  // the #editorTableGrid .col-action width in style.css.
+  const ACT_COL_W = 48;
 
   let scope = 'nego-records';
   let columns = [];          // [{logical, label, type}] for the picker
@@ -137,6 +140,49 @@
     return frozen;
   }
 
+  // This grid remembers its own frozen columns (localStorage 'frozen_cols_editor'),
+  // while app.js's getFrozenColOffset keys off the review/prod sets. Offsets have to
+  // come from THIS set, otherwise frozen editor columns all stick to the same left
+  // edge and overlap the pinned ACT column.
+  function frozenOffsetLeft(colIdx) {
+    const labels = (table && table.labels) || [];
+    const set = frozenCols();
+    let left = 0;
+    for (let c = 0; c < colIdx && c < labels.length; c++) {
+      if (set.has(labels[c])) left += colWidth(labels[c]);
+    }
+    return left;
+  }
+
+  function isTrailingFrozen(colIdx) {
+    const labels = (table && table.labels) || [];
+    const set = frozenCols();
+    if (!set.has(labels[colIdx])) return false;
+    for (let c = colIdx + 1; c < labels.length; c++) {
+      if (set.has(labels[c])) return false;
+    }
+    return true;
+  }
+
+  function matchCell(cellVal, query) {
+    if (typeof window.cellMatchesFilter === 'function') {
+      return window.cellMatchesFilter(cellVal, query);
+    }
+    if (!query) return true;
+    const q = String(query).trim().toLowerCase();
+    if (!q) return true;
+    const cellStr = (cellVal == null ? '' : String(cellVal)).trim();
+    if (q === '(blank)' || q === '[blank]' || q === '(empty)' || q === '[empty]' ||
+        q === '=""' || q === '""' || q === 'null' || q === 'is:blank' || q === 'is:empty') {
+      return cellStr === '';
+    }
+    if (q === '(not blank)' || q === '[not blank]' || q === '(non-blank)' ||
+        q === '!blank' || q === '!= ""' || q === '!=""' || q === 'is:notblank' || q === 'is:notempty') {
+      return cellStr !== '';
+    }
+    return cellStr.toLowerCase().includes(q);
+  }
+
   // Mirrors the CSV workspace header markup so it picks up the same styling and
   // behaviour (pin to freeze, chevron to filter, drag to resize).
   function renderHead() {
@@ -151,8 +197,8 @@
     labels.forEach((h, colIdx) => {
       const w = colWidth(h);
       const isFrozen = fz.has(h);
-      const isLastFrozen = (typeof isLastFrozenCol === 'function') && isLastFrozenCol(labels, colIdx, TABLE_KEY);
-      const left = (isFrozen && typeof getFrozenColOffset === 'function') ? getFrozenColOffset(labels, colIdx, TABLE_KEY) : 0;
+      const isLastFrozen = isFrozen && isTrailingFrozen(colIdx);
+      const left = frozenOffsetLeft(colIdx);
 
       const th = document.createElement('th');
       th.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
@@ -184,6 +230,20 @@
         <div class="th-row-resizer" title="Drag header height (Double-click to reset)"></div>`;
       tr.appendChild(th);
     });
+
+    // Last column on the right: ACT (Delete action button)
+    const thAction = document.createElement('th');
+    thAction.className = 'col-action';
+    thAction.style.width = '54px';
+    thAction.style.minWidth = '54px';
+    thAction.style.maxWidth = '54px';
+    thAction.style.height = `${headerHeight}px`;
+    thAction.style.minHeight = `${headerHeight}px`;
+    thAction.innerHTML = `
+      <div class="th-header-box" style="align-items:center;justify-content:center;"><span class="th-col-name" style="text-align:center;">ACT</span></div>
+      <div class="th-row-resizer" title="Drag header height (Double-click to reset)"></div>`;
+    tr.appendChild(thAction);
+
     head.appendChild(tr);
 
     head.querySelectorAll('[data-freeze-editor]').forEach(el => el.addEventListener('click', (e) => {
@@ -218,7 +278,7 @@
     if (clearBtn) clearBtn.disabled = !Object.values(filters).some(v => (v || '').trim() !== '');
 
     if (typeof attachHeaderResizers === 'function') {
-      attachHeaderResizers(grid, TABLE_KEY, labels, () => { renderHead(); renderBody(); });
+      attachHeaderResizers(grid, TABLE_KEY, [...labels, 'ACT'], () => { renderHead(); renderBody(); });
     }
   }
 
@@ -238,7 +298,7 @@
     const kept = [];
     rows.forEach((cells, origIdx) => {
       for (const [ci, val] of active) {
-        if (!String(cells[ci] || '').toLowerCase().includes(val.trim().toLowerCase())) return;
+        if (!matchCell(cells[ci], val)) return;
       }
       kept.push({ cells, origIdx });
     });
@@ -253,17 +313,26 @@
         : (loadedOnce ? 'No records matched' : 'Nothing loaded');
     }
 
-    const hasRows = shown > 0;
-    grid.classList.toggle('hidden', !hasRows);
     const empty = $('editorEmpty');
-    if (empty) {
-      empty.classList.toggle('hidden', hasRows);
-      const p = empty.querySelector('p');
-      if (p) p.textContent = rows.length
-        ? 'No rows match these filters.'
-        : 'Choose your columns and date range, then load records to edit them.';
+    if (!rows.length) {
+      grid.classList.add('hidden');
+      if (empty) {
+        empty.classList.remove('hidden');
+        const p = empty.querySelector('p');
+        if (p) p.textContent = 'Choose your columns and date range, then load records to edit them.';
+      }
+      return;
     }
-    if (!hasRows) return;
+
+    // Rows are loaded — keep the grid and headers visible even if filters match 0 rows
+    if (empty) empty.classList.add('hidden');
+    grid.classList.remove('hidden');
+
+    if (!shown) {
+      const totalCols = labels.length + 1; // data columns + ACT
+      tbody.innerHTML = `<tr><td colspan="${totalCols}" class="empty-cell" style="text-align: center; padding: 40px 16px; color: var(--ink3);">No rows match these filters.</td></tr>`;
+      return;
+    }
 
     const frag = document.createDocumentFragment();
     for (let i = 0; i < shown; i++) {
@@ -276,14 +345,14 @@
         const logical = cols[ci];
         const w = colWidth(header);
         const isFrozen = fz.has(header);
-        const isLastFrozen = (typeof isLastFrozenCol === 'function') && isLastFrozenCol(labels, ci, TABLE_KEY);
+        const isLastFrozen = isFrozen && isTrailingFrozen(ci);
         const td = document.createElement('td');
         td.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
         td.style.width = `${w}px`;
         td.style.minWidth = `${w}px`;
         td.style.maxWidth = `${w}px`;
         if (isFrozen && typeof getFrozenColOffset === 'function') {
-          td.style.left = `${getFrozenColOffset(labels, ci, TABLE_KEY)}px`;
+          td.style.left = `${frozenOffsetLeft(ci)}px`;
         }
         td.dataset.rowIdx = origIdx;
         td.dataset.colKey = logical;   // the shared selection layer keys off this
@@ -319,9 +388,23 @@
         }
         tr.appendChild(td);
       });
+
+      // Last cell on the right: ACT (Delete button) for this record.
+      const tdAct = document.createElement('td');
+      tdAct.className = 'col-action';
+      tdAct.style.width = '54px';
+      tdAct.style.minWidth = '54px';
+      tdAct.style.maxWidth = '54px';
+      tdAct.innerHTML = `
+        <button type="button" class="btn xs ghost danger rc-del-btn" data-del-editor="${origIdx}" title="Delete this record">
+          <span class="ico" data-icon="trash"></span>
+        </button>`;
+      tr.appendChild(tdAct);
+
       frag.appendChild(tr);
     }
     tbody.appendChild(frag);
+    if (typeof applyIcons === 'function') applyIcons(tbody);
 
     if (typeof initGridSelection === 'function') {
       initGridSelection(grid, {
@@ -473,6 +556,46 @@
 
     const clearFilters = $('btnEditorClearFilters');
     if (clearFilters) clearFilters.addEventListener('click', () => { filters = {}; openFilterCols = new Set(); renderTable(); });
+
+    const grid = $(TABLE_ID);
+    if (grid) {
+      grid.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-del-editor]');
+        if (!btn) return;
+        const rowIdx = parseInt(btn.dataset.delEditor, 10);
+        const rowCells = (table && table.rows && table.rows[rowIdx]) || [];
+        const label = (rowCells[0] != null && String(rowCells[0]).trim())
+          ? String(rowCells[0]).trim()
+          : `record #${rowIdx + 1}`;
+
+        const doDelete = async () => {
+          const a = api();
+          if (!a || !a.delete_editor_row) return;
+          const res = await a.delete_editor_row(scope, rowIdx);
+          if (res && res.ok !== false) {
+            // The backend words this: a synced delete, or a local-only removal.
+            if (typeof toast === 'function') toast(res.msg || 'Record deleted.', false);
+            if (res.table) renderTable(res.table);
+          } else {
+            if (typeof toast === 'function') toast((res && res.error) || 'Failed to delete record.', true);
+          }
+        };
+
+        if (typeof openConfirmModal === 'function') {
+          openConfirmModal({
+            title: 'Delete record',
+            message: `Delete "${escapeHtml(label)}"? This removes it from Dataverse and cannot be undone.`,
+            proceedLabel: 'Delete',
+            cancelLabel: 'Cancel',
+            danger: true,
+            hideQuestion: true,
+            onProceed: doDelete,
+          });
+        } else if (confirm(`Delete "${label}"? This removes it from Dataverse and cannot be undone.`)) {
+          doDelete();
+        }
+      });
+    }
 
     // Results live on their own page; these move between the two.
     const back = $('btnEditorBack');

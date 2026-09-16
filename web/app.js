@@ -71,6 +71,28 @@ let currentPublishMode = 'review'; // 'review' or 'prod'
 let skipRecordsToProd = false;      // stage 4: all records already exist -> skip to stage 5
 window.currentPublishMode = currentPublishMode;
 
+function cellMatchesFilter(cellVal, query) {
+  if (!query) return true;
+  const q = String(query).trim().toLowerCase();
+  if (!q) return true;
+  const cellStr = (cellVal == null ? '' : String(cellVal)).trim();
+  const cellLower = cellStr.toLowerCase();
+
+  // Match blank / empty keywords
+  if (q === '(blank)' || q === '[blank]' || q === '(empty)' || q === '[empty]' ||
+      q === '=""' || q === '""' || q === 'null' || q === 'is:blank' || q === 'is:empty') {
+    return cellStr === '';
+  }
+  // Match non-blank keywords
+  if (q === '(not blank)' || q === '[not blank]' || q === '(non-blank)' ||
+      q === '!blank' || q === '!= ""' || q === '!=""' || q === 'is:notblank' || q === 'is:notempty') {
+    return cellStr !== '';
+  }
+
+  return cellLower.includes(q);
+}
+window.cellMatchesFilter = cellMatchesFilter;
+
 // terminal signal for an async op, pushed from a Python background thread
 function showPublishForm() {
   // Restore the publish button state
@@ -743,8 +765,7 @@ function renderReferenceBody() {
     }
     for (var fi = 0; fi < activeColFilters.length; fi++) {
       var cIdx = parseInt(activeColFilters[fi][0], 10);
-      var cellText = String(rowCells[cIdx] || '').toLowerCase();
-      if (!cellText.includes(activeColFilters[fi][1].trim().toLowerCase())) return;
+      if (!cellMatchesFilter(rowCells[cIdx], activeColFilters[fi][1])) return;
     }
     filtered.push({ rowCells: rowCells, origIdx: origIdx });
   });
@@ -2800,8 +2821,7 @@ function renderReviewBody() {
   currentReviewTable.rows.forEach((rowCells, origIdx) => {
     for (const [colIdxStr, filterVal] of activeFilters) {
       const cIdx = parseInt(colIdxStr, 10);
-      const cellText = String(rowCells[cIdx] || '').toLowerCase();
-      if (!cellText.includes(filterVal.trim().toLowerCase())) return;
+      if (!cellMatchesFilter(rowCells[cIdx], filterVal)) return;
     }
     if (reviewIssuesOnly && !reviewRowHasIssue(origIdx, rowCells, buildErrMap)) return;
     filtered.push({ rowCells, origIdx });
@@ -2815,12 +2835,19 @@ function renderReviewBody() {
     : (shown < total ? `Showing ${shown} of ${total} rows` : `${total} rows`);
 
   if (!filtered.length) {
-    t.classList.add('hidden');
-    $('reviewEmpty').classList.remove('hidden');
-    const emptyMsg = $('reviewEmpty').querySelector('p');
-    if (emptyMsg) emptyMsg.textContent = reviewIssuesOnly
-      ? 'No rows with issues — everything looks valid.'
-      : 'Upload a file in step 1 to see the review table.';
+    if (total === 0) {
+      t.classList.add('hidden');
+      $('reviewEmpty').classList.remove('hidden');
+      const emptyMsg = $('reviewEmpty').querySelector('p');
+      if (emptyMsg) emptyMsg.textContent = reviewIssuesOnly
+        ? 'No rows with issues — everything looks valid.'
+        : 'Upload a file in step 1 to see the review table.';
+      return;
+    }
+    $('reviewEmpty').classList.add('hidden');
+    t.classList.remove('hidden');
+    const emptyCols = ((currentReviewTable.headers || []).length) + 1;
+    tbody.innerHTML = `<tr><td colspan="${emptyCols}" class="empty-cell" style="text-align: center; padding: 40px 16px; color: var(--ink3);">${reviewIssuesOnly ? 'No rows with issues — everything looks valid.' : 'No rows match your filters.'}</td></tr>`;
     return;
   }
   $('reviewEmpty').classList.add('hidden');
@@ -3603,7 +3630,9 @@ function renderProductivityBody() {
 
 
 function passesFilters(cells) {
-  for (const col in prodFilters) if (!String(cells[col] ?? '').toLowerCase().includes(prodFilters[col])) return false;
+  for (const col in prodFilters) {
+    if (!cellMatchesFilter(cells[col], prodFilters[col])) return false;
+  }
   return true;
 }
 

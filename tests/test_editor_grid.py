@@ -153,6 +153,97 @@ class EditorGridTests(unittest.TestCase):
             self.assertNotIn('cr63f_batangasbuild', bucket(scope))
             self.assertNotIn('cr63f_teamcomposition', bucket(scope))
 
+    def test_delete_editor_row_removes_row_and_adjusts_dirty_indices(self):
+        api = _make_api()
+        ed = _seed(api)
+        # Add a 3rd row and stage edits on row 0 and row 2
+        ed['rows'].append({'cr63f_areaindex': 'A-3', 'cr63f_stage': 'Initial',
+                           'cr63f_negotiationdate': '03/15/2026', '_record_id': 'guid-3'})
+        api.update_editor_cell('nego-records', 0, 'cr63f_stage', 'Modified Row 0')
+        api.update_editor_cell('nego-records', 2, 'cr63f_stage', 'Modified Row 2')
+        self.assertEqual(len(ed['rows']), 3)
+        self.assertIn(0, ed['dirty'])
+        self.assertIn(2, ed['dirty'])
+
+        # Delete row 1 (middle row)
+        res = api.delete_editor_row('nego-records', 1)
+        self.assertTrue(res['ok'])
+        self.assertEqual(len(ed['rows']), 2)
+        self.assertEqual(ed['rows'][0]['_record_id'], 'guid-1')
+        self.assertEqual(ed['rows'][1]['_record_id'], 'guid-3')
+        # Dirty index 0 stays 0, dirty index 2 shifts to 1
+        self.assertIn(0, ed['dirty'])
+        self.assertIn(1, ed['dirty'])
+        self.assertNotIn(2, ed['dirty'])
+        self.assertEqual(ed['dirty'][1]['cr63f_stage'], 'Modified Row 2')
+
+    def test_delete_editor_row_out_of_range(self):
+        api = _make_api()
+        _seed(api)
+        res = api.delete_editor_row('nego-records', 99)
+        self.assertFalse(res['ok'])
+        self.assertIn('out of range', res['error'])
+
+    def test_delete_editor_row_calls_dataverse_delete(self):
+        api = _make_api()
+        ed = _seed(api)
+
+        deleted = []
+        class MockDv:
+            def signed_in(self): return True
+            def delete_record(self, table, record_id):
+                deleted.append((table, record_id))
+
+        api.dv_client = MockDv()
+        res = api.delete_editor_row('nego-records', 0)
+        self.assertTrue(res['ok'])
+        self.assertTrue(res.get('synced'))
+        self.assertEqual(deleted, [('cr63f_batangasnegorecord', 'guid-1')])
+        self.assertEqual(len(ed['rows']), 1)
+
+    def test_delete_editor_row_offline_removal_does_not_claim_dataverse(self):
+        # Without a live client the row still leaves the list, but the message must
+        # not imply the published record is gone.
+        api = _make_api()
+        _seed(api)
+        res = api.delete_editor_row('nego-records', 0)
+        self.assertTrue(res['ok'])
+        self.assertFalse(res.get('synced'))
+        self.assertIn('list only', res['msg'])
+
+    def test_delete_editor_row_without_record_id_is_reported(self):
+        api = _make_api()
+        ed = _seed(api)
+        for row in ed['rows']:
+            row.pop('_record_id', None)
+            row.pop('_entity_logical', None)
+
+        class SignedInDv:
+            def signed_in(self): return True
+
+        api.dv_client = SignedInDv()
+        res = api.delete_editor_row('nego-records', 0)
+        self.assertTrue(res['ok'])
+        self.assertFalse(res.get('synced'))
+        self.assertIn('no Dataverse record id', res['msg'])
+
+    def test_delete_editor_row_keeps_row_when_dataverse_delete_fails(self):
+        # A failed remote delete must not drop the row locally: Dataverse would
+        # still hold the record while the operator thinks it is gone.
+        api = _make_api()
+        ed = _seed(api)
+
+        class FailingDv:
+            def signed_in(self): return True
+            def delete_record(self, table, record_id):
+                raise RuntimeError('403 Forbidden')
+
+        api.dv_client = FailingDv()
+        res = api.delete_editor_row('nego-records', 0)
+        self.assertFalse(res['ok'])
+        self.assertIn('403 Forbidden', res['error'])
+        self.assertEqual(len(ed['rows']), 2, 'the row must stay until Dataverse confirms')
+
 
 if __name__ == '__main__':
     unittest.main()
