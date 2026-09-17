@@ -2736,8 +2736,18 @@ def main():
 
     window.events.closed += _force_exit
 
+    def _hide_titlebar_icon():
+        try:
+            if hasattr(window, 'native') and window.native:
+                window.native.ShowIcon = False
+        except Exception:
+            pass
+
+    window.events.shown += _hide_titlebar_icon
+    window.events.loaded += _hide_titlebar_icon
+
     def _auto_check_updates():
-        threading.Timer(2.0, lambda: api.check_for_updates(False)).start()
+        threading.Timer(0.5, lambda: api.check_for_updates(False)).start()
 
     window.events.loaded += _auto_check_updates
 

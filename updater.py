@@ -96,9 +96,10 @@ class UpdateService:
         self._update_info = None
         self._busy = False
         self._config = load_update_config()
+        is_configured = bool((self._config.get("url") or "").strip())
         self._state = {
-            "status": "idle",
-            "configured": bool((self._config.get("url") or "").strip()),
+            "status": "up_to_date" if is_configured else "idle",
+            "configured": is_configured,
             # False for builds Velopack cannot manage (running from source, the
             # PyInstaller dist folder, or a portable copy). Not an error state:
             # those builds are updated by reinstalling, not in-app.
@@ -107,7 +108,7 @@ class UpdateService:
             "latestVersion": "",
             "releaseNotes": "",
             "progress": 0,
-            "message": "",
+            "message": "Up to date" if is_configured else "",
         }
         self._initialise_manager()
 
@@ -175,14 +176,14 @@ class UpdateService:
                 self._update_info = info
                 if not info:
                     changes = dict(status="up_to_date", latestVersion="", releaseNotes="",
-                                   message="You are using the latest version.")
+                                   message="Up to date")
                 else:
                     asset = info.TargetFullRelease
                     latest_ver = str(asset.Version)
                     cur_ver = self._state.get("currentVersion") or ""
                     if latest_ver and latest_ver == cur_ver:
                         changes = dict(status="up_to_date", latestVersion="", releaseNotes="",
-                                       message="You are using the latest version.")
+                                       message="Up to date")
                     else:
                         changes = dict(status="available", latestVersion=latest_ver,
                                        releaseNotes=str(asset.NotesMarkdown or ""),

@@ -240,7 +240,7 @@
 
   function renderUpdate(u) {
     if (!u) return;
-    const status = u.status || 'idle';
+    const status = u.status || 'up_to_date';
     setText('setAppVersion', 'Version ' + (u.currentVersion || '1.0.0'));
     // Revealed only once the real version arrives, so the top bar never shows a
     // placeholder version that contradicts the window title.
@@ -249,13 +249,15 @@
       const wrap = $('tbVersionWrap');
       if (wrap) wrap.hidden = false;
     }
-    setText('updateStatus', u.message || (u.configured ? 'Ready to check' : 'Updates are not configured'));
+    const isUpToDate = status === 'up_to_date' || status === 'idle';
+    setText('updateStatus', isUpToDate ? 'Up to date' : (u.message || (u.configured ? 'Up to date' : 'Updates are not configured')));
     setText('updateLatest', u.latestVersion ? 'Latest: ' + u.latestVersion : '');
 
     const hint = $('updateHint');
     if (hint) {
       if (!u.configured) hint.textContent = 'Set an update URL when creating the release build.';
       else if (u.active === false) hint.textContent = 'Install a release build to receive updates in the app.';
+      else if (isUpToDate) hint.textContent = 'You are running the latest version.';
       else hint.textContent = 'Updates are checked automatically when the app starts.';
     }
 
@@ -263,7 +265,7 @@
     if (dot) {
       dot.className = 'update-dot';
       if (['checking', 'downloading', 'installing'].includes(status)) dot.classList.add('busy');
-      else if (['available', 'ready', 'up_to_date'].includes(status)) dot.classList.add('ready');
+      else if (['available', 'ready', 'up_to_date', 'idle'].includes(status)) dot.classList.add('ready');
       else if (status === 'error') dot.classList.add('error');
     }
 

@@ -50,7 +50,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='blank.ico',
+    icon='icon.ico',
 )
 
 coll = COLLECT(
