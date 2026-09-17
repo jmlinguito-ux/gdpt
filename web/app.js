@@ -920,6 +920,11 @@ let dbDateFrom = '';
 let dbDateTo = '';
 let dbWorkWeekFilter = '';
 let dbSelectedDate = null;   // when a day row is clicked, the muni table filters to it
+// Record table per workstream ('' = the built-in BATANGAS default). Options are
+// cached per workstream so switching the Negotiation/Land Sourcing toggle does
+// not re-query the solution every time.
+let dbTableChoice = { nego: '', sourcing: '' };
+let dbTableOptions = { nego: null, sourcing: null };
 
 // Populate the Work Week dropdown with the Wed-Tue work weeks the selected date
 // range covers (calculated by the backend), preserving the current selection.
@@ -949,6 +954,7 @@ async function loadDashboardData() {
   const a = api();
   if (!a) return;
   refreshDbWorkWeeks();
+  await refreshDbTableOptions();
   dbSelectedDate = null;
   const btnFetch = $('btnFetchDashboard');
   if (btnFetch) {
@@ -962,7 +968,10 @@ async function loadDashboardData() {
       date_from: dbDateFrom,
       date_to: dbDateTo,
       work_week: dbWorkWeekFilter,
-      mode: 'all'  // fetch both; the Negotiation/Land Sourcing toggle filters client-side
+      mode: 'all',  // fetch both; the Negotiation/Land Sourcing toggle filters client-side
+      // '' lets the backend fall back to its remembered / default record table.
+      nego_table: dbTableChoice.nego || '',
+      sourcing_table: dbTableChoice.sourcing || ''
     };
     const res = await a.get_dashboard_data(queryParams);
     if (!res || res.ok === false) {
@@ -971,7 +980,16 @@ async function loadDashboardData() {
     }
     currentDashboardData = res;
     renderDashboard();
-    toast(`Fetched ${res.summary ? res.summary.total_records : 0} dashboard record(s).`, false);
+    const readErrors = res.errors || {};
+    const failedModes = Object.keys(readErrors).filter(k => readErrors[k]);
+    const noTableChosen = !dbTableChoice.nego && !dbTableChoice.sourcing;
+    if (failedModes.length) {
+      toast(`Could not read the ${failedModes.join(' / ')} record table — ${readErrors[failedModes[0]]}`, true);
+    } else if (noTableChosen) {
+      toast('No record table selected — pick one in "Records table" to load published records.', false);
+    } else {
+      toast(`Fetched ${res.summary ? res.summary.total_records : 0} dashboard record(s).`, false);
+    }
   } catch (e) {
     toast(String(e), true);
   } finally {
@@ -982,6 +1000,76 @@ async function loadDashboardData() {
       applyIcons(btnFetch);
     }
   }
+}
+
+// Load the record tables the dashboard may read for the active workstream and
+// repaint the picker. Cached per workstream; pass force to re-read the solution.
+async function refreshDbTableOptions(force) {
+  const sel = $('dbTableSelect');
+  if (!sel) return;
+  const mode = dbActiveMode === 'sourcing' ? 'sourcing' : 'nego';
+  if (!force && dbTableOptions[mode]) {
+    applyDbTableOptions(sel, mode, dbTableOptions[mode]);
+    return;
+  }
+  const a = api();
+  if (!a || !a.get_dashboard_tables) return;
+  sel.innerHTML = '<option value="">Loading tables…</option>';
+  let res = null;
+  try {
+    res = await a.get_dashboard_tables(mode);
+  } catch (e) {
+    res = null;
+  }
+  const ok = !!(res && res.ok);
+  const opts = ok ? res : { tables: [], failed: true };
+  // Only successes are cached, so a failed listing is retried on the next pass.
+  if (ok) dbTableOptions[mode] = opts;
+  // Nothing chosen yet? Adopt the table this workstream remembered last time.
+  if (!dbTableChoice[mode] && opts.saved) dbTableChoice[mode] = opts.saved;
+  applyDbTableOptions(sel, mode, opts);
+}
+
+// Blank first time: the user has to pick a table before anything is read.
+function dbTablePlaceholder(opts) {
+  if (!opts || opts.failed) return 'Could not list record tables';
+  if (opts.connected === false) return 'Connect to Dataverse to load records…';
+  if (!(opts.tables || []).length) return 'No record tables in the configured solution';
+  return 'Select record table…';
+}
+
+function applyDbTableOptions(sel, mode, opts) {
+  const tables = (opts && opts.tables) || [];
+  let html = `<option value="">${escapeHtml(dbTablePlaceholder(opts))}</option>`
+    + tables.map(t => `<option value="${escapeHtml(t.logicalName)}">${escapeHtml(t.displayName)}</option>`).join('');
+  const chosen = dbTableChoice[mode] || '';
+  const known = tables.some(t => (t.logicalName || '').toLowerCase() === chosen.toLowerCase());
+  // Keep a remembered pick selectable even when the solution listing is not
+  // available (offline, metadata error) instead of silently dropping it.
+  if (chosen && !known) {
+    html += `<option value="${escapeHtml(chosen)}">${escapeHtml(chosen)}</option>`;
+  }
+  sel.innerHTML = html;
+  sel.value = chosen;
+  sel.title = chosen
+    ? `Loading published records from ${chosen}.`
+    : 'No record table selected — nothing is read from Dataverse for this workstream.';
+}
+
+// What an empty dashboard table says: the usual "no matches" line, or a nudge to
+// pick a record table when the workstream on screen does not have one yet.
+function dbEmptyMessage(fallback) {
+  const mode = dbActiveMode === 'sourcing' ? 'sourcing' : 'nego';
+  if (!dbTableChoice[mode]) {
+    return `${mode === 'sourcing' ? 'Land sourcing' : 'Negotiation'} has no record table `
+      + `selected — pick one in \u201cRecords table\u201d to load published records.`;
+  }
+  return fallback || 'No records found matching query parameters.';
+}
+
+// Called when the Dataverse connection drops, so a stale table list is not reused.
+function resetDbTableOptions() {
+  dbTableOptions = { nego: null, sourcing: null };
 }
 
 function renderDashboard() {
@@ -995,7 +1083,16 @@ function renderDashboard() {
   if (totalElem) {
     totalElem.textContent = hasDateFilter ? `${summary.total_records || 0} Filtered Reports` : `${summary.total_records || 0} Reports`;
   }
-  const srcElem = $('dbSourcePill'); if (srcElem) srcElem.textContent = source || 'Workspace & Dataverse';
+  const srcElem = $('dbSourcePill');
+  if (srcElem) {
+    srcElem.textContent = source || 'Workspace & Dataverse';
+    // Spell out which record table each workstream was read from.
+    const queried = currentDashboardData.tables || {};
+    const parts = [];
+    if (queried.nego) parts.push(`Negotiation: ${queried.nego}`);
+    if (queried.sourcing) parts.push(`Land sourcing: ${queried.sourcing}`);
+    srcElem.title = parts.length ? parts.join('\n') : 'Active workspace data';
+  }
 
   // Work Week dropdown is populated from the selected date range (Wed-Tue rule)
   // by refreshDbWorkWeeks(); nothing to derive from the returned data here.
@@ -1053,7 +1150,7 @@ function renderDbDateTable() {
   if (countBadge) countBadge.textContent = `${list.length} date${list.length === 1 ? '' : 's'}`;
 
   if (!list.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">No records found matching query parameters.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">${dbEmptyMessage()}</td></tr>`;
     return;
   }
 
@@ -1109,7 +1206,7 @@ function renderDbMuniTable() {
   if (countBadge) countBadge.textContent = `${list.length} municipalit${list.length === 1 ? 'y' : 'ies'}`;
 
   if (!list.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">${dbSelectedDate ? 'No municipality records for this day.' : 'No municipality records matching query parameters.'}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="empty-cell">${dbSelectedDate ? 'No municipality records for this day.' : dbEmptyMessage('No municipality records matching query parameters.')}</td></tr>`;
     return;
   }
 
@@ -1580,6 +1677,8 @@ function applyState(s) {
     }
     if (solSelect) { solSelect.disabled = true; solSelect.innerHTML = '<option value="">Connect to Dataverse…</option>'; }
     dvBootstrapped = false;
+    // Drop cached dashboard record-table listings; they came from a live session.
+    resetDbTableOptions();
   }
 
   $('sideDvDot').classList.toggle('on', !!s.connected);
@@ -1675,6 +1774,8 @@ async function bootstrapDataverse() {
       selectedProdTargetTable = res.suggestedMappings.productivity;
     }
     renderRefGrid(lastState);
+    // A fresh connection can list dashboard record tables that were unavailable offline.
+    refreshDbTableOptions();
   } catch (e) {
     toast(String(e), true);
   } finally {
@@ -4669,10 +4770,27 @@ function wire() {
       btn.classList.add('active');
       dbActiveMode = btn.dataset.dbFilter || 'nego';
       dbSelectedDate = null;  // reset any day drill-down when switching workstream
+      // The picker is per workstream, so swap its options with the toggle.
+      refreshDbTableOptions();
       if (currentDashboardData) renderDashboard();
       else loadDashboardData();
     });
   });
+
+  const dbTableSel = $('dbTableSelect');
+  if (dbTableSel) {
+    dbTableSel.addEventListener('change', async () => {
+      const mode = dbActiveMode === 'sourcing' ? 'sourcing' : 'nego';
+      const logical = dbTableSel.value || '';
+      dbTableChoice[mode] = logical;
+      if (dbTableOptions[mode]) dbTableOptions[mode].saved = logical;
+      const a = api();
+      if (a && a.save_dashboard_table) {
+        try { await a.save_dashboard_table(mode, logical); } catch (e) { /* non-fatal */ }
+      }
+      await loadDashboardData();
+    });
+  }
 
   const dbMuniClearDay = $('dbMuniClearDay');
   if (dbMuniClearDay) {

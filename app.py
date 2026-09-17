@@ -2326,12 +2326,90 @@ class Api:
         except Exception as exc:  # noqa: BLE001
             return {'ok': False, 'error': str(exc), 'workWeeks': []}
 
+    # -- dashboard record-table picker --------------------------------------
+    # The dashboard reads published records straight from Dataverse, so which
+    # "... RECORD" table it reads is selectable per workstream (Batangas,
+    # Quezon, Tarlac, ...). The pick is remembered under its own key, exactly
+    # like the Records editor: choosing what to *read* must never repoint where
+    # stage 4/5 publishes.
+    _DASHBOARD_MODES = {'nego': 'nego-records', 'sourcing': 'sourcing-records'}
+
+    @staticmethod
+    def _dashboard_mode(mode: str = '') -> str:
+        m = str(mode or '').strip().lower()
+        return 'sourcing' if m in ('sourcing', 'land-sourcing') else 'nego'
+
+    @staticmethod
+    def _dashboard_table_pref_key(mode: str) -> str:
+        return 'dashboard_table_' + Api._dashboard_mode(mode)
+
+    def _dashboard_table_name(self, mode: str, table: str = '') -> str:
+        """Logical record table for a workstream: picked, else remembered, else ''.
+
+        There is deliberately no built-in fallback — a workstream is read only once
+        the user has chosen a table here (the pick is remembered for next time).
+        """
+        chosen = (table or '').strip()
+        if chosen:
+            return chosen
+        return str(self.ui_settings.get(self._dashboard_table_pref_key(mode)) or '').strip()
+
+    def _dashboard_solution_records(self, mode: str) -> list[dict]:
+        """Record tables (never productivity tables) in the configured solution."""
+        tokens = self._EDITOR_SCOPES.get(self._DASHBOARD_MODES[self._dashboard_mode(mode)])
+        if not tokens:
+            return []
+        kind, kind_type = tokens
+        tables = self.dv_client.get_solution_tables(self._configured_solution() or None) or []
+        matches = []
+        for t in tables:
+            logical = str((t or {}).get('logicalName') or '')
+            low = logical.lower()
+            if kind in low and kind_type in low:
+                matches.append({'logicalName': logical,
+                                'displayName': t.get('displayName') or logical})
+        matches.sort(key=lambda t: (t['displayName'] or '').lower())
+        return matches
+
+    def get_dashboard_tables(self, mode: str = 'nego'):
+        """Record tables the dashboard may load for one workstream + which one is picked.
+
+        The picker starts blank: nothing is read from Dataverse for a workstream
+        until the user chooses its table, and that choice is remembered.
+        """
+        m = self._dashboard_mode(mode)
+        connected = bool(self.dv_client and self.dv_client.signed_in())
+        tables = []
+        if connected:
+            try:
+                tables = self._dashboard_solution_records(m)
+            except Exception as exc:  # noqa: BLE001
+                return self._err(exc)
+        return {'ok': True, 'mode': m, 'connected': connected, 'tables': tables,
+                'saved': str(self.ui_settings.get(self._dashboard_table_pref_key(m)) or '').strip()}
+
+    def save_dashboard_table(self, mode: str = 'nego', table: str = ''):
+        """Remember the dashboard's record-table pick (empty = nothing selected)."""
+        try:
+            m = self._dashboard_mode(mode)
+            logical = str(table or '').strip()
+            self.ui_settings[self._dashboard_table_pref_key(m)] = logical
+            self._write_settings()
+            return self._ok(mode=m, table=logical)
+        except Exception as exc:  # noqa: BLE001
+            return self._err(str(exc))
+
     def get_dashboard_data(self, params: dict | None = None):
         params = params or {}
         date_from = (params.get('date_from') or '').strip()
         date_to = (params.get('date_to') or '').strip()
         work_week = (params.get('work_week') or '').strip()
         query_mode = (params.get('mode') or 'all').strip()
+        # Per-workstream record table: whatever the dashboard picker sent, else the
+        # remembered pick. Empty means "no table chosen yet", so nothing is read
+        # from Dataverse for that workstream — the picker starts blank by design.
+        nego_table = self._dashboard_table_name('nego', params.get('nego_table') or '')
+        sourcing_table = self._dashboard_table_name('sourcing', params.get('sourcing_table') or '')
 
         try:
             muni_map = {}
@@ -2401,12 +2479,18 @@ class Api:
                     if _passes_query(sort_k, ww):
                         nego_records.append({'date': d_fmt, 'sort_k': sort_k, 'ww': ww, 'muni': m_raw, 'code': c_raw})
 
-            # 2. From Dataverse (if connected)
+            # 2. From Dataverse (only when connected AND a table is chosen for that
+            #    workstream — an unchosen workstream keeps its workspace rows).
             source_label = 'Active Workspace'
-            if self.dv_client and self.dv_client.signed_in():
+            dv_errors = {}
+            dv_nego = include_nego and bool(nego_table)
+            dv_sourcing = include_sourcing and bool(sourcing_table)
+            if self.dv_client and self.dv_client.signed_in() and (dv_nego or dv_sourcing):
                 try:
-                    dv_data = self.dv_client.get_dashboard_records(date_from, date_to, work_week, query_mode)
-                    if dv_data.get('nego') is not None and include_nego:
+                    dv_data = self.dv_client.get_dashboard_records(
+                        date_from, date_to, work_week, query_mode,
+                        nego_table=nego_table, sourcing_table=sourcing_table)
+                    if dv_data.get('nego') is not None and dv_nego:
                         nego_records = []
                         for r in dv_data.get('nego', []):
                             d_fmt = r.get('date') or ''
@@ -2415,7 +2499,7 @@ class Api:
                             m_raw = (r.get('municipality') or '').strip().upper()
                             c_raw = (r.get('municode') or '').strip()
                             nego_records.append({'date': d_fmt, 'sort_k': sort_k, 'ww': ww, 'muni': m_raw, 'code': c_raw})
-                    if dv_data.get('sourcing') is not None and include_sourcing:
+                    if dv_data.get('sourcing') is not None and dv_sourcing:
                         sourcing_records = []
                         for r in dv_data.get('sourcing', []):
                             d_fmt = r.get('date') or ''
@@ -2426,6 +2510,7 @@ class Api:
                             sourcing_records.append({'date': d_fmt, 'sort_k': sort_k, 'ww': ww, 'muni': m_raw, 'code': c_raw})
                     if dv_data.get('nego') or dv_data.get('sourcing'):
                         source_label = 'Dataverse Live Query'
+                    dv_errors = dv_data.get('errors') or {}
                 except Exception:
                     pass
 
@@ -2543,6 +2628,10 @@ class Api:
                 'by_municipality': by_muni,
                 'by_date_muni': by_date_muni,
                 'source': source_label,
+                # Which record table each workstream was read from (for the UI pill).
+                'tables': {'nego': nego_table, 'sourcing': sourcing_table},
+                # Non-empty per workstream when that table could not be read.
+                'errors': dv_errors,
             }
         except Exception as exc:  # noqa: BLE001
             return self._err(str(exc))

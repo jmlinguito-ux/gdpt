@@ -940,8 +940,9 @@ tr.row-invalid-date:hover td {
 }
 .db-filter-left { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .db-filter-right { display: flex; align-items: center; gap: 10px; margin-left: auto; }
-.db-date-picker-group, .db-ww-filter-group, .db-preset-wrap { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.db-ww-filter-group { padding-left: 16px; border-left: 1px solid var(--line-soft); }
+.db-date-picker-group, .db-ww-filter-group, .db-table-filter-group, .db-preset-wrap { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.db-ww-filter-group, .db-table-filter-group { padding-left: 16px; border-left: 1px solid var(--line-soft); }
+.db-table-select { max-width: 260px; }
 .db-date-input-wrap { display: inline-flex; align-items: center; gap: 5px; }
 .db-input-sublabel { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink3); }
 .db-date-input {

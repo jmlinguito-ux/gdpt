@@ -127,6 +127,12 @@ cached locally so you don't sign in every launch.
 2. Click **Load from Dataverse** → all reference tables load; existing records
    reload automatically to match the mode of whatever file you upload.
 3. Continue with Calculate → Generate → Export as usual.
+4. **Dashboard** → pick the workstream (Negotiation / Land Sourcing) and, in
+   **Records table**, which published "… RECORD" table to read (Batangas,
+   Quezon, Tarlac, …). It starts blank: nothing is read from Dataverse until you
+   choose a table, and the choice is remembered per workstream. Picking here only
+   changes what the dashboard *reads* — the tables stages 4/5 publish into are
+   left alone.
 
 File loading (below) still works as an offline fallback or for ad-hoc data.
 

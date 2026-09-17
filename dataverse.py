@@ -2119,9 +2119,21 @@ class DataverseClient:
             })
         return [r for r in out if r['aREAINDEX']]
 
-    def get_dashboard_records(self, date_from: str | None = None, date_to: str | None = None, work_week: str | None = None, mode: str = 'all') -> dict:
-        """Fetch summary records from negotiation and/or land sourcing tables based on query parameters."""
-        out = {'nego': [], 'sourcing': []}
+    def get_dashboard_records(self, date_from: str | None = None, date_to: str | None = None,
+                              work_week: str | None = None, mode: str = 'all',
+                              nego_table: str = '', sourcing_table: str = '') -> dict:
+        """Fetch summary records from negotiation and/or land sourcing tables based on query parameters.
+
+        nego_table / sourcing_table name the "... RECORD" table to read for each
+        workstream (the dashboard's per-workstream picker). There is no built-in
+        default: a workstream whose table is empty is not read at all, so the
+        caller has to choose one explicitly.
+        """
+        out = {'nego': [], 'sourcing': [],
+               'tables': {'nego': '', 'sourcing': ''},
+               # Per-workstream read failures (e.g. a picked table that cannot be
+               # read), so the dashboard can say so instead of showing a silent 0.
+               'errors': {'nego': '', 'sourcing': ''}}
         from productivity_tool import get_work_week
 
         from_key = date_from.replace('-', '').replace('/', '') if date_from else '00000000'
@@ -2160,15 +2172,16 @@ class DataverseClient:
         include_nego = mode in ('all', 'nego', 'negotiation', '')
         include_sourcing = mode in ('all', 'sourcing', 'land-sourcing', '')
 
-        if include_nego:
+        nego_ent = (nego_table or '').strip()
+        if include_nego and nego_ent:
+            out['tables']['nego'] = nego_ent
             try:
-                nego_table = 'cr63f_batangasnegorecord'
-                nego_info = self.get_entity_info(nego_table)
+                nego_info = self.get_entity_info(nego_ent)
                 nego_set = nego_info['entitySetName']
-                date_col = self._resolve(nego_table, 'NEGO DATE', 'Nego Date', 'Date')
-                muni_col = self._resolve(nego_table, 'MUNICIPALITY', 'Municipality', 'City')
-                code_col = self._resolve(nego_table, 'MUNICODE', 'MuniCode', 'Muni Code')
-                id_col = self._resolve(nego_table, 'ID', 'Id')
+                date_col = self._resolve(nego_ent, 'NEGO DATE', 'Nego Date', 'Date')
+                muni_col = self._resolve(nego_ent, 'MUNICIPALITY', 'Municipality', 'City')
+                code_col = self._resolve(nego_ent, 'MUNICODE', 'MuniCode', 'Muni Code')
+                id_col = self._resolve(nego_ent, 'ID', 'Id')
                 select_nego = [c['logical'] for c in (date_col, muni_col, code_col, id_col) if c]
                 if select_nego:
                     raw_nego = self._get_all(nego_set, select_nego, formatted=True, top=5000)
@@ -2184,18 +2197,19 @@ class DataverseClient:
                                 'municode': _formatted(r, code_col['logical']) if code_col else '',
                                 'id': _to_int(r.get(id_col['logical'])) if id_col else 0,
                             })
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                out['errors']['nego'] = str(exc)
 
-        if include_sourcing:
+        src_ent = (sourcing_table or '').strip()
+        if include_sourcing and src_ent:
+            out['tables']['sourcing'] = src_ent
             try:
-                src_table = 'cr63f_batangassourcingrecord'
-                src_info = self.get_entity_info(src_table)
+                src_info = self.get_entity_info(src_ent)
                 src_set = src_info['entitySetName']
-                date_col = self._resolve(src_table, 'REPORT DATE', 'Report Date', 'SOURCING DATE', 'Date')
-                muni_col = self._resolve(src_table, 'MUNICIPALITY', 'Municipality', 'City')
-                code_col = self._resolve(src_table, 'MUNICODE', 'MuniCode', 'Muni Code')
-                id_col = self._resolve(src_table, 'ID', 'Id')
+                date_col = self._resolve(src_ent, 'REPORT DATE', 'Report Date', 'SOURCING DATE', 'Date')
+                muni_col = self._resolve(src_ent, 'MUNICIPALITY', 'Municipality', 'City')
+                code_col = self._resolve(src_ent, 'MUNICODE', 'MuniCode', 'Muni Code')
+                id_col = self._resolve(src_ent, 'ID', 'Id')
                 select_src = [c['logical'] for c in (date_col, muni_col, code_col, id_col) if c]
                 if select_src:
                     raw_src = self._get_all(src_set, select_src, formatted=True, top=5000)
@@ -2211,8 +2225,8 @@ class DataverseClient:
                                 'municode': _formatted(r, code_col['logical']) if code_col else '',
                                 'id': _to_int(r.get(id_col['logical'])) if id_col else 0,
                             })
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                out['errors']['sourcing'] = str(exc)
 
         return out
 

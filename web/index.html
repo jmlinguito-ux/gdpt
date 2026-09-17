@@ -484,6 +484,12 @@
                     <option value="" selected>All work weeks</option>
                   </select>
                 </div>
+                <div class="db-table-filter-group">
+                  <label for="dbTableSelect" class="eyebrow">Records table</label>
+                  <select id="dbTableSelect" class="select db-table-select" title="Which Dataverse record table this dashboard loads">
+                    <option value="" selected>Select record table…</option>
+                  </select>
+                </div>
                 <button class="link-btn" id="btnDbClearDateRange" title="Reset date and work week filters">Clear</button>
               </div>
               <div class="db-filter-right">
@@ -543,7 +549,7 @@
                       </tr>
                     </thead>
                     <tbody id="dbDateTbody">
-                      <tr><td colspan="4" class="empty-cell">Set query parameters and click &lsquo;Fetch data&rsquo;.</td></tr>
+                      <tr><td colspan="4" class="empty-cell">Pick a record table, set the dates, then click &lsquo;Fetch data&rsquo;.</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -568,7 +574,7 @@
                       </tr>
                     </thead>
                     <tbody id="dbMuniTbody">
-                      <tr><td colspan="4" class="empty-cell">Set query parameters and click &lsquo;Fetch data&rsquo;.</td></tr>
+                      <tr><td colspan="4" class="empty-cell">Pick a record table, set the dates, then click &lsquo;Fetch data&rsquo;.</td></tr>
                     </tbody>
                   </table>
                 </div>
