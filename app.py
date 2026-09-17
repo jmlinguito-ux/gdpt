@@ -47,7 +47,7 @@ except Exception:  # noqa: BLE001
 
 # Single source of truth: the single-instance check finds the running window by
 # this exact title, so both uses must stay derived from the same string.
-APP_TITLE = 'Ground Data Processing Tool'
+APP_TITLE = ''
 
 
 def _resource_dir() -> str:
