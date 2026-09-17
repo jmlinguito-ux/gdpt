@@ -251,8 +251,16 @@ class Api:
     def install_update(self):
         status = self.updater.apply_and_restart()
         if status.get('status') == 'installing':
-            # Give the API response/event time to paint, then release all app files.
-            threading.Timer(0.8, lambda: os._exit(0)).start()
+            def _shutdown():
+                time.sleep(0.3)
+                try:
+                    if hasattr(self, '_window') and self._window:
+                        self._window.destroy()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                os._exit(0)
+            threading.Thread(target=_shutdown, daemon=True).start()
         return {'ok': status.get('status') != 'error', 'update': status,
                 'error': status.get('message') if status.get('status') == 'error' else None}
 
@@ -2699,11 +2707,12 @@ def _ensure_single_instance() -> bool:
         last_error = kernel32.GetLastError()
 
         if last_error == ERROR_ALREADY_EXISTS:
-            hwnd = user32.FindWindowW(None, APP_TITLE)
-            if hwnd and user32.IsWindowVisible(hwnd):
-                user32.ShowWindow(hwnd, SW_RESTORE)
-                user32.SetForegroundWindow(hwnd)
-                return False
+            if APP_TITLE:
+                hwnd = user32.FindWindowW(None, APP_TITLE)
+                if hwnd and user32.IsWindowVisible(hwnd):
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                    user32.SetForegroundWindow(hwnd)
+                    return False
             # Zombie background process detected - terminate it
             _terminate_orphan_instances()
             return True
@@ -2720,6 +2729,7 @@ def main():
     api = Api()
     window = webview.create_window(APP_TITLE, _index_url(), js_api=api,
                                    width=1400, height=860, min_size=(1400, 860))
+    api._window = window
 
     def _force_exit():
         os._exit(0)

@@ -178,9 +178,15 @@ class UpdateService:
                                    message="You are using the latest version.")
                 else:
                     asset = info.TargetFullRelease
-                    changes = dict(status="available", latestVersion=str(asset.Version),
-                                   releaseNotes=str(asset.NotesMarkdown or ""),
-                                   message=f"Version {asset.Version} is available.")
+                    latest_ver = str(asset.Version)
+                    cur_ver = self._state.get("currentVersion") or ""
+                    if latest_ver and latest_ver == cur_ver:
+                        changes = dict(status="up_to_date", latestVersion="", releaseNotes="",
+                                       message="You are using the latest version.")
+                    else:
+                        changes = dict(status="available", latestVersion=latest_ver,
+                                       releaseNotes=str(asset.NotesMarkdown or ""),
+                                       message=f"Version {asset.Version} is available.")
             except Exception as exc:
                 # Automatic checks stay quiet in the UI; their state is still visible in Settings.
                 changes = dict(status="error", message=f"Could not check for updates: {exc}",
