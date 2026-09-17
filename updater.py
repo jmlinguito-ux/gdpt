@@ -49,9 +49,10 @@ def _clear_icon_cache() -> None:
     import subprocess
     import time
 
+    win_dir = os.environ.get("SystemRoot", "C:\\Windows")
     # 1. Stop Explorer so the cache files are not locked.
     subprocess.call(["taskkill", "/F", "/IM", "explorer.exe"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    cwd=win_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1.5)
 
     # 2. Delete the icon-cache databases.
@@ -68,8 +69,8 @@ def _clear_icon_cache() -> None:
         except OSError:
             pass
 
-    # 3. Restart Explorer (it restores the taskbar and desktop).
-    subprocess.Popen(["explorer.exe"])
+    # 3. Restart Explorer (it restores the taskbar and desktop) with CWD in C:\Windows
+    subprocess.Popen(["explorer.exe"], cwd=win_dir)
 
 
 def run_startup_hooks() -> None:
