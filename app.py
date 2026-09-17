@@ -257,6 +257,11 @@ class Api:
         return {'ok': True, 'update': self.updater.download()}
 
     def install_update(self):
+        try:
+            import tempfile
+            os.chdir(tempfile.gettempdir())
+        except Exception:
+            pass
         status = self.updater.apply_and_restart()
         if status.get('status') == 'installing':
             def _shutdown():
@@ -267,7 +272,9 @@ class Api:
                         win.destroy()
                 except Exception:
                     pass
-                time.sleep(0.5)
+                time.sleep(0.2)
+                _terminate_child_processes()
+                time.sleep(0.1)
                 os._exit(0)
             threading.Thread(target=_shutdown, daemon=True).start()
         return {'ok': status.get('status') != 'error', 'update': status,
@@ -2642,32 +2649,112 @@ class Api:
 
 _mutex_handle = None
 
-def _terminate_orphan_instances():
-    """Immediately terminate any background or zombie instances of Ground-Data-Processing-Tool."""
+def _terminate_child_processes(root_pid: int = None) -> None:
+    """Terminate child processes (such as WebView2 renderer/utility processes) before app exit/update."""
+    if sys.platform != 'win32':
+        return
+    import ctypes
+    from ctypes import wintypes
+    import tempfile
+
+    try:
+        os.chdir(tempfile.gettempdir())
+    except Exception:
+        pass
+
+    if root_pid is None:
+        root_pid = os.getpid()
+
+    try:
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ('dwSize', wintypes.DWORD),
+                ('cntUsage', wintypes.DWORD),
+                ('th32ProcessID', wintypes.DWORD),
+                ('th32DefaultBasePriority', ctypes.c_size_t),
+                ('th32ModuleID', wintypes.DWORD),
+                ('cntThreads', wintypes.DWORD),
+                ('th32ParentProcessID', wintypes.DWORD),
+                ('pcPriClassBase', wintypes.LONG),
+                ('dwFlags', wintypes.DWORD),
+                ('szExeFile', ctypes.c_wchar * 260),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+
+        h_snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if not h_snap or h_snap == -1:
+            return
+
+        entries = []
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+            while True:
+                entries.append((pe.th32ProcessID, pe.th32ParentProcessID, pe.szExeFile.lower()))
+                if not kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                    break
+        kernel32.CloseHandle(h_snap)
+
+        descendants = set()
+        to_check = [root_pid]
+        while to_check:
+            parent = to_check.pop()
+            for pid, ppid, name in entries:
+                if ppid == parent and pid not in descendants:
+                    if 'update.exe' not in name and 'explorer.exe' not in name:
+                        descendants.add(pid)
+                        to_check.append(pid)
+
+        for pid in descendants:
+            h_proc = kernel32.OpenProcess(0x0001, False, pid)
+            if h_proc:
+                kernel32.TerminateProcess(h_proc, 0)
+                kernel32.CloseHandle(h_proc)
+    except Exception:
+        pass
+
+
+def _terminate_orphan_instances() -> None:
+    """Kill any zombie processes of this app or orphan WebView2 processes from previous crashed runs."""
     if sys.platform != 'win32':
         return
     try:
         import ctypes
         from ctypes import wintypes
 
-        TH32CS_SNAPPROCESS = 0x00000002
-        PROCESS_TERMINATE = 0x0001
-
         class PROCESSENTRY32W(ctypes.Structure):
             _fields_ = [
                 ('dwSize', wintypes.DWORD),
                 ('cntUsage', wintypes.DWORD),
                 ('th32ProcessID', wintypes.DWORD),
-                ('th32DefaultBasePriority', ctypes.c_long),
+                ('th32DefaultBasePriority', ctypes.c_size_t),
+                ('th32ModuleID', wintypes.DWORD),
+                ('cntThreads', wintypes.DWORD),
+                ('th32ParentProcessID', wintypes.DWORD),
+                ('pcPriClassBase', wintypes.LONG),
                 ('dwFlags', wintypes.DWORD),
                 ('szExeFile', ctypes.c_wchar * 260),
             ]
 
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+
         current_pid = os.getpid()
         target_name = 'ground-data-processing-tool'
 
-        kernel32 = ctypes.windll.kernel32
-        h_snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        h_snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
         if not h_snap or h_snap == -1:
             return
 
@@ -2678,7 +2765,7 @@ def _terminate_orphan_instances():
             while True:
                 exe_name = pe.szExeFile.lower()
                 if target_name in exe_name and pe.th32ProcessID != current_pid:
-                    h_proc = kernel32.OpenProcess(PROCESS_TERMINATE, False, pe.th32ProcessID)
+                    h_proc = kernel32.OpenProcess(0x0001, False, pe.th32ProcessID)
                     if h_proc:
                         kernel32.TerminateProcess(h_proc, 0)
                         kernel32.CloseHandle(h_proc)
