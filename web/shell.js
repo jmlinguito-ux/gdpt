@@ -293,6 +293,8 @@
     if (result && result.update) renderUpdate(result.update);
   }
 
+  let promptedRestartVersion = '';
+
   window.onUpdateStatus = function (u) {
     if (window.lastState) window.lastState.update = u;
     renderUpdate(u);
@@ -306,6 +308,24 @@
           proceedLabel: 'Download update',
           cancelLabel: 'Later',
           onProceed: startUpdateDownload
+        });
+      }
+    } else if (u.status === 'ready' && u.latestVersion && promptedRestartVersion !== u.latestVersion) {
+      promptedRestartVersion = u.latestVersion;
+      if (window.openConfirmModal) {
+        window.openConfirmModal({
+          title: 'Update ready to install',
+          message: 'Version ' + u.latestVersion + ' has been downloaded. Restart the app now to finish installing it.',
+          proceedLabel: 'Restart and install',
+          cancelLabel: 'Later',
+          onProceed: async () => {
+            const api = updateApi();
+            if (!api || !api.install_update) return;
+            const result = await api.install_update();
+            if (result && result.ok === false && window.toast) {
+              window.toast(result.error || 'Could not install update.', true);
+            }
+          }
         });
       }
     } else if (u.status === 'error' && !u.quiet && window.toast) {
