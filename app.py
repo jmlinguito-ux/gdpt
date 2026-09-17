@@ -2738,13 +2738,44 @@ def main():
 
     def _hide_titlebar_icon():
         try:
-            if hasattr(window, 'native') and window.native:
-                window.native.ShowIcon = False
+            if not hasattr(window, 'native') or not window.native:
+                return
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+
+            hwnd = window.native.Handle.ToInt32()
+            hdc = user32.GetDC(0)
+            hbm_color = gdi32.CreateCompatibleBitmap(hdc, 16, 16)
+            hbm_mask = gdi32.CreateBitmap(16, 16, 1, 1, (ctypes.c_byte * 32)(*([0xFF] * 32)))
+            user32.ReleaseDC(0, hdc)
+
+            class ICONINFO(ctypes.Structure):
+                _fields_ = [
+                    ('fIcon', wintypes.BOOL),
+                    ('xHotspot', wintypes.DWORD),
+                    ('yHotspot', wintypes.DWORD),
+                    ('hbmMask', wintypes.HBITMAP),
+                    ('hbmColor', wintypes.HBITMAP),
+                ]
+
+            ii = ICONINFO()
+            ii.fIcon = True
+            ii.hbmMask = hbm_mask
+            ii.hbmColor = hbm_color
+            h_icon = user32.CreateIconIndirect(ctypes.byref(ii))
+            gdi32.DeleteObject(hbm_mask)
+            gdi32.DeleteObject(hbm_color)
+
+            if h_icon:
+                WM_SETICON = 0x0080
+                ICON_SMALL = 0
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_icon)
         except Exception:
             pass
 
     window.events.shown += _hide_titlebar_icon
-    window.events.loaded += _hide_titlebar_icon
 
     def _auto_check_updates():
         threading.Timer(0.5, lambda: api.check_for_updates(False)).start()
