@@ -231,7 +231,7 @@ class UpdateService:
         self._set(status="installing", message="Closing the app and installing the update…")
         try:
             # Update.exe waits for this process to release WebView2 and then relaunches it.
-            self._manager.wait_exit_then_apply_updates(self._update_info, False, True, None)
+            self._manager.wait_exit_then_apply_updates(self._update_info, True, True, None)
             return self.state()
         except Exception as exc:
             return self._set(status="error", message=f"Could not start the installer: {exc}")
