@@ -31,11 +31,59 @@ def app_version() -> str:
     return str(load_update_config().get("version") or DEFAULT_VERSION)
 
 
+def _clear_icon_cache() -> None:
+    """Delete Windows icon-cache DB files and restart Explorer.
+
+    Windows caches taskbar/shortcut icons in per-user DB files and does not
+    always refresh them when the underlying EXE is replaced by an update.
+    Deleting the cache and restarting Explorer forces an immediate rebuild so
+    the new icon appears in the taskbar and on the Desktop shortcut.
+
+    The operation is best-effort: any individual failure is silently ignored
+    so that a missing file or a race with Explorer does not abort the hook.
+    Only runs on Windows.
+    """
+    if os.name != "nt":
+        return
+    import glob
+    import subprocess
+    import time
+
+    # 1. Stop Explorer so the cache files are not locked.
+    subprocess.call(["taskkill", "/F", "/IM", "explorer.exe"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.5)
+
+    # 2. Delete the icon-cache databases.
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    targets = [
+        os.path.join(local_appdata, "IconCache.db"),
+        *glob.glob(os.path.join(local_appdata,
+                                "Microsoft", "Windows", "Explorer",
+                                "iconcache_*.db")),
+    ]
+    for path in targets:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    # 3. Restart Explorer (it restores the taskbar and desktop).
+    subprocess.Popen(["explorer.exe"])
+
+
 def run_startup_hooks() -> None:
     """Let Velopack process install/update command-line hooks before UI startup."""
     try:
         import velopack
-        velopack.App().run()
+
+        def _on_install(_version: str) -> None:
+            _clear_icon_cache()
+
+        def _on_updated(_version: str) -> None:
+            _clear_icon_cache()
+
+        velopack.App().on_first_run(_on_install).on_restarted(_on_updated).run()
     except ImportError:
         pass  # Development from source does not require the optional updater SDK.
 
