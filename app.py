@@ -165,15 +165,21 @@ class Api:
         self.auto_mode = False
         self._is_busy = False
         self._busy_lock = threading.Lock()
+        self._win = None
         # remembered files are loaded by boot_load() AFTER the window paints,
         # so a slow/large file never delays the window from appearing.
 
     # -- helpers -----------------------------------------------------------
     def _window(self):
-        return webview.windows[0]
+        if getattr(self, '_win', None) is not None:
+            return self._win
+        return webview.windows[0] if getattr(webview, 'windows', None) else None
 
     def _open_dialog(self, file_types):
-        result = self._window().create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False, file_types=file_types)
+        win = self._window()
+        if not win:
+            return None
+        result = win.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False, file_types=file_types)
         if not result:
             return None
         return result[0] if isinstance(result, (list, tuple)) else result
@@ -234,8 +240,10 @@ class Api:
     # -- application updates ----------------------------------------------
     def _emit_update_status(self, status: dict):
         try:
-            payload = json.dumps(status)
-            self._window().evaluate_js(f'window.onUpdateStatus && window.onUpdateStatus({payload})')
+            win = self._window()
+            if win:
+                payload = json.dumps(status)
+                win.evaluate_js(f'window.onUpdateStatus && window.onUpdateStatus({payload})')
         except Exception:  # Window may not be ready during early startup.
             pass
 
@@ -254,8 +262,9 @@ class Api:
             def _shutdown():
                 time.sleep(0.3)
                 try:
-                    if hasattr(self, '_window') and self._window:
-                        self._window.destroy()
+                    win = self._window()
+                    if win:
+                        win.destroy()
                 except Exception:
                     pass
                 time.sleep(0.5)
@@ -2729,7 +2738,7 @@ def main():
     api = Api()
     window = webview.create_window(APP_TITLE, _index_url(), js_api=api,
                                    width=1400, height=860, min_size=(1400, 860))
-    api._window = window
+    api._win = window
 
     def _force_exit():
         os._exit(0)

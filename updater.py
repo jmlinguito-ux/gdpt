@@ -176,14 +176,14 @@ class UpdateService:
                 self._update_info = info
                 if not info:
                     changes = dict(status="up_to_date", latestVersion="", releaseNotes="",
-                                   message="Up to date")
+                                   message="You are running the latest version.")
                 else:
                     asset = info.TargetFullRelease
                     latest_ver = str(asset.Version)
                     cur_ver = self._state.get("currentVersion") or ""
-                    if latest_ver and latest_ver == cur_ver:
+                    if latest_ver and latest_ver.lstrip("v") == cur_ver.lstrip("v"):
                         changes = dict(status="up_to_date", latestVersion="", releaseNotes="",
-                                       message="Up to date")
+                                       message="You are running the latest version.")
                     else:
                         changes = dict(status="available", latestVersion=latest_ver,
                                        releaseNotes=str(asset.NotesMarkdown or ""),
