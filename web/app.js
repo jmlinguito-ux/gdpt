@@ -561,9 +561,12 @@ function renderReferenceView(res) {
   var headerHeight = getSavedHeaderHeight(tableKey, 44);
   var tr = document.createElement('tr');
 
-  (res.labels || []).forEach(function(l, idx) {
+  var refOrder = getOrderedColumnIndices(tableKey, res.keys || res.labels || []);
+  refOrder.forEach(function(idx) {
+    var l = (res.labels || [])[idx];
     var savedW = getSavedColWidth(tableKey, l, null);
     var th = document.createElement('th');
+    th.dataset.colKey = String((res.keys || res.labels || [])[idx]);
     if (savedW) {
       th.style.width = savedW + 'px';
       th.style.minWidth = savedW + 'px';
@@ -577,7 +580,7 @@ function renderReferenceView(res) {
 
     th.innerHTML = '<div class="th-header-box">' +
       '<div class="th-title-wrap">' +
-        '<span class="th-col-name" title="' + escapeHtml(l) + '">' + escapeHtml(l) + '</span>' +
+        '<span class="th-col-name" title="' + escapeHtml(l) + '">' + escapeHtml(l) + '</span>' + sortableHeaderButton(tableKey, th.dataset.colKey) +
         '<button type="button" class="th-chevron-btn ' + (isFilterActive ? 'active' : '') + '" data-ref-filter-toggle="' + idx + '" title="Filter column">' +
           '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>' +
         '</button>' +
@@ -635,7 +638,8 @@ function renderReferenceView(res) {
     });
   });
 
-  attachHeaderResizers(t, tableKey, res.labels);
+  attachHeaderResizers(t, tableKey, refOrder.map(function(i) { return res.labels[i]; }).concat(['ACT']));
+  attachTableColumnControls(t, tableKey, function() { renderReferenceView(currentRefState); });
   applyIcons(thead);
   renderReferenceBody();
 }
@@ -649,7 +653,9 @@ var refVScrollBound = false; // scroll listener attached once
 
 function buildRefRow(rowCells, origIdx, tableKey) {
   var tr = document.createElement('tr');
-  rowCells.forEach(function(c, cIdx) {
+  var order = getOrderedColumnIndices(tableKey, currentRefState.keys || currentRefState.labels || []);
+  order.forEach(function(cIdx) {
+    var c = rowCells[cIdx];
     var key = (currentRefState.keys && currentRefState.keys[cIdx]) || '';
     var label = (currentRefState.labels && currentRefState.labels[cIdx]) || key;
     var savedW = getSavedColWidth(tableKey, label, null);
@@ -769,8 +775,8 @@ function renderReferenceBody() {
     }
     filtered.push({ rowCells: rowCells, origIdx: origIdx });
   });
+  refFiltered = sortTableItems(filtered, tableKey, currentRefState.keys || currentRefState.labels || [], function(item, idx) { return item.rowCells[idx]; });
 
-  refFiltered = filtered;
   var total = currentRefState.rows.length;
   $('refCount').textContent = hasAnyFilter
     ? 'Showing ' + filtered.length + ' of ' + total + ' rows'
@@ -1139,12 +1145,33 @@ function renderDashboard() {
 
 function dbModeCount(r) { return (dbActiveMode === 'sourcing') ? (r.sourcing_count || 0) : (r.nego_count || 0); }
 
+function renderSimpleTableHead(tableId, tableKey, columns, rerender) {
+  const tableEl = $(tableId), thead = tableEl && tableEl.querySelector('thead');
+  if (!thead) return [];
+  const keys = columns.map(c => c.key);
+  const order = getOrderedColumnIndices(tableKey, keys);
+  const tr = document.createElement('tr');
+  order.forEach(idx => {
+    const col = columns[idx], th = document.createElement('th');
+    th.dataset.colKey = col.key;
+    th.className = col.className || '';
+    th.innerHTML = `<div class="th-title-wrap"><span class="th-col-name">${escapeHtml(col.label)}</span>${sortableHeaderButton(tableKey, col.key)}</div>`;
+    tr.appendChild(th);
+  });
+  thead.innerHTML = ''; thead.appendChild(tr);
+  attachTableColumnControls(tableEl, tableKey, rerender);
+  return order;
+}
+
 function renderDbDateTable() {
   if (!currentDashboardData || !currentDashboardData.by_date) return;
   const tbody = $('dbDateTbody');
   if (!tbody) return;
 
-  const list = currentDashboardData.by_date.filter(r => dbModeCount(r) > 0);
+  const columns = [{key:'date',label:'Date'}, {key:'work_week',label:'WW'}, {key:'reports',label:'Reports',className:'num'}, {key:'share',label:'Share',className:'bar-col'}];
+  const order = renderSimpleTableHead('dbDateTable', 'dashboard_date', columns, renderDbDateTable);
+  let list = currentDashboardData.by_date.filter(r => dbModeCount(r) > 0);
+  list = sortTableItems(list, 'dashboard_date', columns.map(c => c.key), (r, idx) => idx === 0 ? r.date : idx === 1 ? r.work_week : dbModeCount(r));
 
   const countBadge = $('dbDateCount');
   if (countBadge) countBadge.textContent = `${list.length} date${list.length === 1 ? '' : 's'}`;
@@ -1162,15 +1189,15 @@ function renderDbDateTable() {
     const tr = document.createElement('tr');
     tr.className = 'db-click-row' + (dbSelectedDate === r.date ? ' db-row-selected' : '');
     tr.dataset.date = r.date;
-    tr.innerHTML = `
-      <td><strong>${escapeHtml(r.date)}</strong></td>
-      <td><span class="db-ww-pill">${escapeHtml(r.work_week || '—')}</span></td>
-      <td class="num"><strong>${total}</strong></td>
-      <td class="bar-col">
+    const cells = [
+      `<strong>${escapeHtml(r.date)}</strong>`,
+      `<span class="db-ww-pill">${escapeHtml(r.work_week || '—')}</span>`,
+      `<strong>${total}</strong>`,
+      `
         <div class="db-progress" title="${total} report(s) — click the row to see this day's per-municipality counts">
           <div class="db-progress-bar" style="width:${share}%"></div>
-        </div>
-      </td>`;
+        </div>`];
+    order.forEach(idx => { const td = document.createElement('td'); td.className = columns[idx].className || ''; td.innerHTML = cells[idx]; tr.appendChild(td); });
     frag.appendChild(tr);
   });
   tbody.innerHTML = '';
@@ -1193,8 +1220,11 @@ function renderDbMuniTable() {
   // Source list: a specific clicked day, or the whole filtered range.
   const dayMap = currentDashboardData.by_date_muni || {};
   let source = (dbSelectedDate && dayMap[dbSelectedDate]) ? dayMap[dbSelectedDate] : (currentDashboardData.by_municipality || []);
+  const columns = [{key:'municipality',label:'Municipality'}, {key:'municode',label:'MuniCode'}, {key:'reports',label:'Reports',className:'num'}, {key:'share',label:'Share',className:'bar-col'}];
+  const order = renderSimpleTableHead('dbMuniTable', 'dashboard_muni', columns, renderDbMuniTable);
   let list = source.filter(m => dbModeCount(m) > 0);
-  list = list.slice().sort((a, b) => dbModeCount(b) - dbModeCount(a));
+  if (getTableSort('dashboard_muni')) list = sortTableItems(list, 'dashboard_muni', columns.map(c => c.key), (m, idx) => idx === 0 ? m.municipality : idx === 1 ? m.municode : dbModeCount(m));
+  else list = list.slice().sort((a, b) => dbModeCount(b) - dbModeCount(a));
 
   // Panel title + "Show all days" affordance reflect the selection.
   const title = $('dbMuniTitle');
@@ -1216,15 +1246,15 @@ function renderDbMuniTable() {
     const total = dbModeCount(m);
     const pct = Math.round(total / dayTotal * 1000) / 10;
     const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td><strong>${escapeHtml(m.municipality)}</strong> ${m.province ? `<span class="muted font-xs">(${escapeHtml(m.province)})</span>` : ''}</td>
-      <td><code>${escapeHtml(m.municode || '—')}</code></td>
-      <td class="num"><strong>${total}</strong></td>
-      <td class="bar-col">
+    const cells = [
+      `<strong>${escapeHtml(m.municipality)}</strong> ${m.province ? `<span class="muted font-xs">(${escapeHtml(m.province)})</span>` : ''}`,
+      `<code>${escapeHtml(m.municode || '—')}</code>`,
+      `<strong>${total}</strong>`,
+      `
         <div class="db-progress" title="${pct}% of ${dbSelectedDate ? 'the day' : 'total reports'}">
           <div class="db-progress-bar" style="width:${Math.min(100, Math.max(4, pct))}%"></div>
-        </div>
-      </td>`;
+        </div>`];
+    order.forEach(idx => { const td = document.createElement('td'); td.className = columns[idx].className || ''; td.innerHTML = cells[idx]; tr.appendChild(td); });
     frag.appendChild(tr);
   });
   tbody.innerHTML = '';
@@ -1405,6 +1435,7 @@ function countProdTableValidationErrors(tableData) {
       if (!res.valid) count++;
     });
   });
+  count += Object.keys(tableData.memoErrors || {}).length;
   return count;
 }
 window.countProdTableValidationErrors = countProdTableValidationErrors;
@@ -1415,11 +1446,15 @@ function updateProdValidationState() {
   const btnPublish = $('btnPublish');
 
   const errCount = countProdTableValidationErrors(prodTable);
+  const memoErrorCount = Object.keys((prodTable && prodTable.memoErrors) || {}).length;
 
   if (bar) {
     if (errCount > 0) {
       bar.classList.remove('hidden');
-      bar.innerHTML = `<span class="ico" data-icon="alert-triangle"></span> <span><strong>${errCount} invalid cell${errCount > 1 ? 's' : ''} detected</strong> with data type mismatches. Fix all red cells before publishing.</span>`;
+      const detail = memoErrorCount
+        ? `${memoErrorCount} row${memoErrorCount === 1 ? '' : 's'} have conflicting Memo No. values in Team Composition.`
+        : 'Fix all red cells before publishing.';
+      bar.innerHTML = `<span class="ico" data-icon="alert-triangle"></span> <span><strong>${errCount} blocking issue${errCount === 1 ? '' : 's'} detected.</strong> ${detail}</span>`;
       applyIcons(bar);
     } else {
       bar.classList.add('hidden');
@@ -1601,6 +1636,13 @@ function applyState(s) {
       Object.keys(s.uiSettings.header_heights).forEach(k => {
         if (!localStorage.getItem(`header_height_${k}`)) {
           localStorage.setItem(`header_height_${k}`, String(s.uiSettings.header_heights[k]));
+        }
+      });
+    }
+    if (s.uiSettings.column_orders) {
+      Object.keys(s.uiSettings.column_orders).forEach(k => {
+        if (!localStorage.getItem(`column_order_${k}`)) {
+          localStorage.setItem(`column_order_${k}`, JSON.stringify(s.uiSettings.column_orders[k] || []));
         }
       });
     }
@@ -2160,6 +2202,105 @@ function setSavedHeaderHeight(tableKey, height) {
   } catch (e) {}
 }
 
+// Column layout and sorting are intentionally display-only.  Stable keys are
+// persisted, while row/column indices continue to point at the canonical data
+// arrays used by editing, validation and publishing.
+function getOrderedColumnIndices(tableKey, keys) {
+  const canonical = (keys || []).map(String);
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(`column_order_${tableKey}`) || '[]'); } catch (e) {}
+  const valid = Array.isArray(saved) ? saved.filter(k => canonical.includes(k)) : [];
+  canonical.forEach(k => { if (!valid.includes(k)) valid.push(k); });
+  return valid.map(k => canonical.indexOf(k));
+}
+
+function setSavedColumnOrder(tableKey, keys) {
+  try {
+    localStorage.setItem(`column_order_${tableKey}`, JSON.stringify(keys));
+    scheduleSaveUiSettings({ column_orders: { [tableKey]: keys } });
+  } catch (e) {}
+}
+
+function getTableSort(tableKey) {
+  try {
+    const v = JSON.parse(localStorage.getItem(`table_sort_${tableKey}`) || 'null');
+    if (v && v.key && (v.dir === 'asc' || v.dir === 'desc')) return v;
+  } catch (e) {}
+  return null;
+}
+
+function cycleTableSort(tableKey, key) {
+  const cur = getTableSort(tableKey);
+  const next = !cur || cur.key !== key ? { key, dir: 'asc' }
+    : cur.dir === 'asc' ? { key, dir: 'desc' } : null;
+  if (next) localStorage.setItem(`table_sort_${tableKey}`, JSON.stringify(next));
+  else localStorage.removeItem(`table_sort_${tableKey}`);
+  return next;
+}
+
+function compareTableValues(a, b) {
+  const av = String(a == null ? '' : a).trim(), bv = String(b == null ? '' : b).trim();
+  if (!av || !bv) return !av && !bv ? 0 : (!av ? 1 : -1);
+  const an = Number(av.replace(/,/g, '')), bn = Number(bv.replace(/,/g, ''));
+  if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+  const dateRx = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+  const ad = dateRx.exec(av), bd = dateRx.exec(bv);
+  if (ad && bd) return new Date(+ad[3], +ad[1] - 1, +ad[2]) - new Date(+bd[3], +bd[1] - 1, +bd[2]);
+  return av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function sortTableItems(items, tableKey, keys, valueAt) {
+  const sort = getTableSort(tableKey);
+  if (!sort) return items;
+  const idx = (keys || []).map(String).indexOf(String(sort.key));
+  if (idx < 0) return items;
+  return items.map((item, stable) => ({ item, stable })).sort((a, b) => {
+    const cmp = compareTableValues(valueAt(a.item, idx), valueAt(b.item, idx));
+    return (sort.dir === 'desc' ? -cmp : cmp) || a.stable - b.stable;
+  }).map(x => x.item);
+}
+
+function sortableHeaderButton(tableKey, key) {
+  const sort = getTableSort(tableKey);
+  const active = sort && String(sort.key) === String(key);
+  const glyph = active ? (sort.dir === 'asc' ? '\u2191' : '\u2193') : '\u21C5';
+  return `<button type="button" class="th-sort-btn ${active ? 'active' : ''}" data-table-sort-key="${escapeHtml(key)}" title="Sort column">${glyph}</button>`;
+}
+
+function attachTableColumnControls(tableEl, tableKey, onChanged) {
+  if (!tableEl) return;
+  const headers = Array.from(tableEl.querySelectorAll('thead th[data-col-key]'));
+  let dragged = null;
+  headers.forEach(th => {
+    th.draggable = true;
+    th.addEventListener('dragstart', e => {
+      if (e.target.closest('button,input,.th-resizer,.th-row-resizer')) { e.preventDefault(); return; }
+      dragged = th; th.classList.add('col-dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    th.addEventListener('dragover', e => { e.preventDefault(); if (dragged && dragged !== th) th.classList.add('col-drag-over'); });
+    th.addEventListener('dragleave', () => th.classList.remove('col-drag-over'));
+    th.addEventListener('drop', e => {
+      e.preventDefault(); th.classList.remove('col-drag-over');
+      if (!dragged || dragged === th) return;
+      const row = th.parentElement;
+      const before = Array.from(row.children).indexOf(dragged) < Array.from(row.children).indexOf(th);
+      row.insertBefore(dragged, before ? th.nextSibling : th);
+      const keys = Array.from(row.querySelectorAll('th[data-col-key]')).map(x => x.dataset.colKey);
+      setSavedColumnOrder(tableKey, keys);
+      dragged = null;
+      if (onChanged) onChanged();
+    });
+    th.addEventListener('dragend', () => {
+      headers.forEach(x => x.classList.remove('col-dragging', 'col-drag-over'));
+      dragged = null;
+    });
+  });
+  tableEl.querySelectorAll('[data-table-sort-key]').forEach(btn => btn.addEventListener('click', e => {
+    e.stopPropagation(); cycleTableSort(tableKey, btn.dataset.tableSortKey); if (onChanged) onChanged();
+  }));
+}
+
 function isCompactCol(headerName) {
   const norm = String(headerName || '').trim().toUpperCase();
   return norm === 'ID' || norm === '#' || norm === 'TEAM' || norm === 'GROUP' || norm === 'CORRECT TEAM' || norm === 'CORRECT GROUP' || norm === 'ACT' || norm === 'ACTION_BTN';
@@ -2377,7 +2518,7 @@ function isFutureDateVal(val) {
 
 function isCalculatedColumn(headerName) {
   const norm = String(headerName || '').trim().toUpperCase();
-  return ['LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'CORRECT TEAM', 'CORRECT GROUP', 'MATCHED TEAM', 'MATCHED GROUP'].includes(norm);
+  return ['LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'MEMO REF', 'CORRECT TEAM', 'CORRECT GROUP', 'MATCHED TEAM', 'MATCHED GROUP'].includes(norm);
 }
 
 function isMatchedNegotiatorColumn(headerName) {
@@ -2439,13 +2580,18 @@ function renderReview(table) {
   const tr = document.createElement('tr');
   const headerHeight = getSavedHeaderHeight('review', 44);
 
-  table.headers.forEach((h, colIdx) => {
+  const reviewOrder = getOrderedColumnIndices('review', table.headers);
+  const reviewDisplayHeaders = reviewOrder.map(i => table.headers[i]);
+  reviewOrder.forEach((colIdx) => {
+    const h = table.headers[colIdx];
     const colWidth = getColWidth(h, 'review');
     const isFrozen = frozenReviewCols.has(h);
-    const isLastFrozen = isLastFrozenCol(table.headers, colIdx, 'review');
-    const leftOffset = isFrozen ? getFrozenColOffset(table.headers, colIdx, 'review') : 0;
+    const displayIdx = reviewOrder.indexOf(colIdx);
+    const isLastFrozen = isLastFrozenCol(reviewDisplayHeaders, displayIdx, 'review');
+    const leftOffset = isFrozen ? getFrozenColOffset(reviewDisplayHeaders, displayIdx, 'review') : 0;
 
     const th = document.createElement('th');
+    th.dataset.colKey = h;
     th.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
     th.style.width = `${colWidth}px`;
     th.style.minWidth = `${colWidth}px`;
@@ -2468,6 +2614,7 @@ function renderReview(table) {
             </svg>
           </button>
           <span class="th-col-name" data-freeze-review="${colIdx}" title="Click to ${isFrozen ? 'unfreeze' : 'freeze'} ${escapeHtml(h)}">${escapeHtml(h)}</span>
+          ${sortableHeaderButton('review', h)}
           <button type="button" class="th-chevron-btn ${isFilterActive ? 'active' : ''}" data-filter-toggle-review="${colIdx}" title="Filter column">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
           </button>
@@ -2547,7 +2694,8 @@ function renderReview(table) {
     });
   });
 
-  attachHeaderResizers(t, 'review', [...table.headers, 'ACT'], () => renderReview(currentReviewTable));
+  attachHeaderResizers(t, 'review', [...reviewDisplayHeaders, 'ACT'], () => renderReview(currentReviewTable));
+  attachTableColumnControls(t, 'review', () => renderReview(currentReviewTable));
 
 
   $('reviewEmpty').classList.add('hidden');
@@ -2770,7 +2918,7 @@ async function reconcileClassCell(row, origIdx) {
   const allowed = classChoicesFor(classificationVal).map(o => o.toUpperCase());
   const curClass = String(currentReviewTable.rows[origIdx][classIdx] || '').toUpperCase();
 
-  const classTd = row.children[classIdx];
+  const classTd = row.querySelector(`td[data-col-idx="${classIdx}"]`);
   const ctrl = classTd ? classTd.querySelector('.cell-select, .cell-input') : null;
 
   const mustClear = curClass && curClass !== 'UNASSIGNED' && !allowed.includes(curClass);
@@ -2831,7 +2979,7 @@ function refreshReviewRow(tr, buildErrMap) {
   let hasInvalidDate = false;
 
   headers.forEach((h, cIdx) => {
-    const td = tr.children[cIdx];
+    const td = tr.querySelector(`td[data-col-idx="${cIdx}"]`);
     if (!td) return;
     const m = meta[h] || { type: 'text' };
     const valStr = String(rowCells[cIdx] || '').trim();
@@ -2927,6 +3075,7 @@ function renderReviewBody() {
     if (reviewIssuesOnly && !reviewRowHasIssue(origIdx, rowCells, buildErrMap)) return;
     filtered.push({ rowCells, origIdx });
   });
+  sortTableItems(filtered, 'review', currentReviewTable.headers, (item, idx) => item.rowCells[idx]).forEach((item, i) => { filtered[i] = item; });
 
   const total = currentReviewTable.rows.length;
   const shown = Math.min(filtered.length, MAX_RENDER);
@@ -2972,13 +3121,17 @@ function renderReviewBody() {
       row.classList.add('row-invalid-date');
     }
 
-    rowCells.forEach((c, colIdx) => {
+    const reviewOrder = getOrderedColumnIndices('review', currentReviewTable.headers);
+    reviewOrder.forEach((colIdx) => {
+      const c = rowCells[colIdx];
       const header = currentReviewTable.headers[colIdx];
       const meta = (currentReviewTable.meta && currentReviewTable.meta[header]) || { type: 'text' };
       const colWidth = getColWidth(header, 'review');
       const isFrozen = frozenReviewCols.has(header);
-      const isLastFrozen = isLastFrozenCol(currentReviewTable.headers, colIdx, 'review');
-      const leftOffset = isFrozen ? getFrozenColOffset(currentReviewTable.headers, colIdx, 'review') : 0;
+      const displayHeaders = reviewOrder.map(i => currentReviewTable.headers[i]);
+      const displayIdx = reviewOrder.indexOf(colIdx);
+      const isLastFrozen = isLastFrozenCol(displayHeaders, displayIdx, 'review');
+      const leftOffset = isFrozen ? getFrozenColOffset(displayHeaders, displayIdx, 'review') : 0;
 
       const td = document.createElement('td');
       td.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
@@ -3220,14 +3373,20 @@ function renderProductivity(table) {
   const tr = document.createElement('tr');
   const headerHeight = getSavedHeaderHeight('prod', 44);
 
-  table.labels.forEach((label, i) => {
+  const prodKeys = (table.columns && table.columns.length) ? table.columns : table.labels;
+  const prodOrder = getOrderedColumnIndices('prod', prodKeys);
+  const prodDisplayLabels = prodOrder.map(i => table.labels[i]);
+  prodOrder.forEach((i) => {
+    const label = table.labels[i];
     const colKey = (table.columns && table.columns[i]) || label;
     const colWidth = getColWidth(label, 'prod');
     const isFrozen = frozenProdCols.has(label);
-    const isLastFrozen = isLastFrozenCol(table.labels, i, 'prod');
-    const leftOffset = isFrozen ? getFrozenColOffset(table.labels, i, 'prod') : 0;
+    const displayIdx = prodOrder.indexOf(i);
+    const isLastFrozen = isLastFrozenCol(prodDisplayLabels, displayIdx, 'prod');
+    const leftOffset = isFrozen ? getFrozenColOffset(prodDisplayLabels, displayIdx, 'prod') : 0;
 
     const th = document.createElement('th');
+    th.dataset.colKey = String(prodKeys[i]);
     th.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
     th.style.width = `${colWidth}px`;
     th.style.minWidth = `${colWidth}px`;
@@ -3250,6 +3409,7 @@ function renderProductivity(table) {
             </svg>
           </button>
           <span class="th-col-name" data-freeze-prod="${i}" title="Click to ${isFrozen ? 'unfreeze' : 'freeze'} ${escapeHtml(label)}">${escapeHtml(label)}</span>
+          ${sortableHeaderButton('prod', prodKeys[i])}
           <button type="button" class="th-chevron-btn ${isFilterActive ? 'active' : ''}" data-filter-toggle-prod="${i}" title="Filter column">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
           </button>
@@ -3329,7 +3489,8 @@ function renderProductivity(table) {
     });
   });
 
-  attachHeaderResizers(t, 'prod', [...table.labels, 'ACT'], () => renderProductivity(prodTable));
+  attachHeaderResizers(t, 'prod', [...prodDisplayLabels, 'ACT'], () => renderProductivity(prodTable));
+  attachTableColumnControls(t, 'prod', () => renderProductivity(prodTable));
 
 
   $('prodEmpty').classList.add('hidden');
@@ -3349,14 +3510,18 @@ function renderProductivityBody() {
   const frag = document.createDocumentFragment();
   let matched = 0, shown = 0;
 
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-    const cells = rows[rowIndex];
+  let prodItems = rows.map((cells, rowIndex) => ({ cells, rowIndex }));
+  prodItems = sortTableItems(prodItems, 'prod', columns || labels || [], (item, idx) => item.cells[idx]);
+  for (const prodItem of prodItems) {
+    const rowIndex = prodItem.rowIndex;
+    const cells = prodItem.cells;
     if (!passesFilters(cells)) continue;
-    if (prodIssuesOnly && !prodRowHasIssue(cells)) continue;
+    if (prodIssuesOnly && !prodRowHasIssue(cells, rowIndex)) continue;
     matched++;
     if (shown >= MAX_RENDER) continue;
     shown++;
     const tr = document.createElement('tr');
+    const memoError = String((prodTable.memoErrors || {})[String(rowIndex)] || '');
 
     // Check for invalid dates in row
     let hasInvalidDate = false;
@@ -3391,18 +3556,23 @@ function renderProductivityBody() {
       const src = String((rowCells && rowCells[sourceColIdx]) || '').trim();
       const blank = src !== '' && isBlankMatchVal(rowCells && rowCells[matchedColIdx]);
       tr.classList.toggle('row-unassigned-match', blank);
-      const mtd = tr.children[matchedColIdx];
+      const mtd = tr.querySelector(`td[data-col-idx="${matchedColIdx}"]`);
       if (mtd) mtd.classList.toggle('cell-unassigned-match', blank);
     };
 
-    cells.forEach((c, ci) => {
+    const prodKeys = columns || labels || [];
+    const prodOrder = getOrderedColumnIndices('prod', prodKeys);
+    const prodDisplayLabels = prodOrder.map(i => (labels && labels[i]) || prodKeys[i]);
+    prodOrder.forEach((ci) => {
+      const c = cells[ci];
       const colKey = (columns && columns[ci]) || '';
       const colLabel = (labels && labels[ci]) || colKey;
       const colMeta = (meta && meta[colKey]) || { type: 'text' };
       const colWidth = getColWidth(colLabel, 'prod');
       const isFrozen = frozenProdCols.has(colLabel);
-      const isLastFrozen = isLastFrozenCol(labels || columns, ci, 'prod');
-      const leftOffset = isFrozen ? getFrozenColOffset(labels || columns, ci, 'prod') : 0;
+      const displayIdx = prodOrder.indexOf(ci);
+      const isLastFrozen = isLastFrozenCol(prodDisplayLabels, displayIdx, 'prod');
+      const leftOffset = isFrozen ? getFrozenColOffset(prodDisplayLabels, displayIdx, 'prod') : 0;
 
       const td = document.createElement('td');
       td.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
@@ -3421,6 +3591,14 @@ function renderProductivityBody() {
       if (!valRes.valid) {
         td.classList.add('cell-invalid');
         td.title = valRes.error;
+      }
+      const isMemoRef = String(colKey || colLabel).trim().toUpperCase() === 'MEMO REF';
+      if (isMemoRef && memoError) {
+        td.classList.add('cell-invalid', 'cell-memo-ambiguous');
+        td.title = memoError;
+      } else if (isMemoRef && !valStr) {
+        td.classList.add('cell-memo-blank');
+        td.title = 'No Memo No. is assigned to this employee in Team Composition.';
       }
 
       if (isMatchColumn(colLabel) || isMatchColumn(colKey) || matchSet.has(ci)) {
@@ -3480,12 +3658,17 @@ function renderProductivityBody() {
             const res = await call('update_productivity_cell', rowIndex, colKey, newVal);
             if (res && res.ok !== false) {
               toast(`Updated ${colKey}.`);
+              if (isMatchedNeg && res.table) {
+                prodTable = res.table;
+                renderProductivity(prodTable);
+                return;
+              }
               if (res.row) {
                 prodTable.rows[rowIndex] = res.row;
                 const curSourceVal = (sourceColIdx >= 0 && res.row[sourceColIdx] !== undefined) ? String(res.row[sourceColIdx]).trim() : sourceNegVal;
                 columns.forEach((h, hIdx) => {
                   const updatedVal = res.row[hIdx] !== undefined ? String(res.row[hIdx]).toUpperCase() : '';
-                  const siblingTd = tr.children[hIdx];
+                  const siblingTd = tr.querySelector(`td[data-col-idx="${hIdx}"]`);
                   if (siblingTd && hIdx !== ci) {
                     const siblingCtrl = siblingTd.querySelector('.cell-select, .cell-input');
                     if (siblingCtrl) {
@@ -3512,8 +3695,10 @@ function renderProductivityBody() {
       } else if (isCalculatedColumn(colLabel) || isCalculatedColumn(colKey)) {
         const input = document.createElement('input');
         input.type = 'text';
-        input.className = `cell-input cell-readonly ${!valRes.valid ? 'cell-invalid' : ''}`;
+        input.className = `cell-input cell-readonly ${(!valRes.valid || (isMemoRef && memoError)) ? 'cell-invalid' : ''} ${isMemoRef && !memoError && !valStr ? 'cell-memo-blank' : ''}`;
         if (!valRes.valid) input.title = valRes.error;
+        else if (isMemoRef && memoError) input.title = memoError;
+        else if (isMemoRef && !valStr) input.title = 'No Memo No. is assigned to this employee in Team Composition.';
         input.readOnly = true;
         input.value = valStr.toUpperCase();
         input.spellcheck = false;
@@ -3570,7 +3755,7 @@ function renderProductivityBody() {
               const curSourceVal = (sourceColIdx >= 0 && res.row[sourceColIdx] !== undefined) ? String(res.row[sourceColIdx]).trim() : sourceNegVal;
               columns.forEach((h, hIdx) => {
                 const updatedVal = res.row[hIdx] !== undefined ? String(res.row[hIdx]).toUpperCase() : '';
-                const siblingTd = tr.children[hIdx];
+                const siblingTd = tr.querySelector(`td[data-col-idx="${hIdx}"]`);
                 if (siblingTd && hIdx !== ci) {
                   const siblingCtrl = siblingTd.querySelector('.cell-select, .cell-input');
                   if (siblingCtrl) {
@@ -3642,7 +3827,7 @@ function renderProductivityBody() {
               const curSourceVal = (sourceColIdx >= 0 && res.row[sourceColIdx] !== undefined) ? String(res.row[sourceColIdx]).trim() : sourceNegVal;
               columns.forEach((h, hIdx) => {
                 const updatedVal = res.row[hIdx] !== undefined ? String(res.row[hIdx]).toUpperCase() : '';
-                const siblingTd = tr.children[hIdx];
+                const siblingTd = tr.querySelector(`td[data-col-idx="${hIdx}"]`);
                 if (siblingTd && hIdx !== ci) {
                   const siblingCtrl = siblingTd.querySelector('.cell-select, .cell-input');
                   if (siblingCtrl) {
@@ -3743,8 +3928,9 @@ function passesFilters(cells) {
 // present-but-non-matching name (red "no-match") is NOT treated as an issue —
 // it stays visible as a red cue but does not keep the row in the issues filter
 // or block publishing.
-function prodRowHasIssue(cells) {
+function prodRowHasIssue(cells, rowIndex = -1) {
   if (!prodTable) return false;
+  if (rowIndex >= 0 && (prodTable.memoErrors || {})[String(rowIndex)]) return true;
   const { columns, labels, meta } = prodTable;
   const cols = columns || labels || [];
   const labs = labels || columns || [];
@@ -3775,7 +3961,7 @@ function countProdIssueRows(tableData) {
   if (!t || !t.rows) return 0;
   let count = 0;
   for (let i = 0; i < t.rows.length; i++) {
-    if (prodRowHasIssue(t.rows[i])) count++;
+    if (prodRowHasIssue(t.rows[i], i)) count++;
   }
   return count;
 }
@@ -3928,26 +4114,30 @@ async function previewDataverseTable(logicalName) {
 
     
     const t = $('previewTable'), thead = t.querySelector('thead'), tbody = t.querySelector('tbody');
-    thead.innerHTML = ''; tbody.innerHTML = '';
-    const tr = document.createElement('tr');
-    (res.labels || []).forEach(l => {
-      const th = document.createElement('th');
-      th.innerHTML = `<div class="th-inner">${escapeHtml(l)}</div>`;
-      tr.appendChild(th);
-    });
-    thead.appendChild(tr);
-
-    const frag = document.createDocumentFragment();
-    (res.rows || []).forEach(r => {
-      const row = document.createElement('tr');
-      r.forEach(cell => {
-        const td = document.createElement('td');
-        td.textContent = cell;
-        row.appendChild(td);
+    const previewKey = 'preview_' + logicalName;
+    const previewKeys = (res.keys && res.keys.length) ? res.keys : res.labels;
+    const paintPreview = () => {
+      thead.innerHTML = ''; tbody.innerHTML = '';
+      const order = getOrderedColumnIndices(previewKey, previewKeys || []);
+      const tr = document.createElement('tr');
+      order.forEach(idx => {
+        const th = document.createElement('th');
+        th.dataset.colKey = String(previewKeys[idx]);
+        th.innerHTML = `<div class="th-title-wrap"><span class="th-col-name">${escapeHtml((res.labels || [])[idx])}</span>${sortableHeaderButton(previewKey, previewKeys[idx])}</div>`;
+        tr.appendChild(th);
       });
-      frag.appendChild(row);
-    });
-    tbody.appendChild(frag);
+      thead.appendChild(tr);
+      const sortedRows = sortTableItems((res.rows || []).slice(), previewKey, previewKeys || [], (row, idx) => row[idx]);
+      const frag = document.createDocumentFragment();
+      sortedRows.forEach(r => {
+        const row = document.createElement('tr');
+        order.forEach(idx => { const td = document.createElement('td'); td.textContent = r[idx]; row.appendChild(td); });
+        frag.appendChild(row);
+      });
+      tbody.appendChild(frag);
+      attachTableColumnControls(t, previewKey, paintPreview);
+    };
+    paintPreview();
 
     t.classList.remove('hidden');
     $('cardTablePreview').classList.remove('hidden');
@@ -5401,4 +5591,3 @@ else {
     }
   });
 }
-

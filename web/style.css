@@ -765,6 +765,16 @@ thead th {
 }
 .th-header-box { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; }
 .th-title-wrap { display: flex; align-items: center; gap: 4px; width: 100%; }
+thead th[data-col-key] { cursor: grab; }
+thead th[data-col-key]:active { cursor: grabbing; }
+thead th.col-dragging { opacity: .45; }
+thead th.col-drag-over { box-shadow: inset 3px 0 0 var(--accent); }
+.th-sort-btn {
+  flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0;
+  border-radius: 5px; background: transparent; color: var(--ink3);
+  font-size: 14px; line-height: 22px; cursor: pointer;
+}
+.th-sort-btn:hover, .th-sort-btn.active { background: var(--accent-soft); color: var(--accent); }
 .th-col-name {
   font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.08em;
   text-transform: uppercase; color: var(--ink2); cursor: pointer;
@@ -815,6 +825,13 @@ tbody td.cell-unassigned-match .combo-input {
   background-color: var(--warn-soft) !important;
   border-color: var(--warn-line) !important;
   color: var(--warn) !important; font-weight: 600 !important;
+}
+tbody td.cell-memo-blank,
+.cell-input.cell-readonly.cell-memo-blank {
+  background-color: var(--warn-soft) !important;
+  border-color: var(--warn-line) !important;
+  color: var(--warn) !important;
+  font-weight: 600 !important;
 }
 tbody tr.row-invalid-date td { background-color: var(--bad-soft) !important; }
 tbody tr.publish-error-row, tbody tr.publish-error-row td { background-color: var(--bad-soft) !important; }

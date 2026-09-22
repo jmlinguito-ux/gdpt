@@ -653,6 +653,12 @@ class Api:
 
         kinds_to_load = selected_kinds if selected_kinds is not None else ['team', 'municipality', 'mapping', 'build', 'existing']
 
+        # A user may have added or renamed a Dataverse column since this app
+        # connected. "Refresh from Dataverse" must re-read attribute metadata,
+        # otherwise the session-level cache would hide the new field until the
+        # application was restarted.
+        self.dv_client.clear_metadata_cache()
+
         def load_one(kind):
             """Fetch one reference table. Returns (kind, label, rows) for the caller
             to apply on the main worker thread."""
@@ -696,6 +702,8 @@ class Api:
                 with cf.ThreadPoolExecutor(max_workers=min(5, len(kinds_to_load) or 1)) as pool:
                     for kind, label, data, area_set in pool.map(load_one, kinds_to_load):
                         setattr(self, self._REF_ATTR[kind], data)
+                        if kind == 'team' and self.productivity:
+                            self._refresh_productivity_team_derivations()
                         if kind == 'existing':
                             self.existing_count = len(data)
                         mapped = mappings.get(kind, '').strip() if mappings else ''
@@ -1183,6 +1191,8 @@ class Api:
                 elif not (self.dv_client and self.dv_client.signed_in()):
                     sync_msg = 'Saved locally (Dataverse not connected)'
 
+                if kind == 'team' and self.productivity:
+                    self._refresh_productivity_team_derivations()
                 return self._ok(row=data[row_index], synced=synced, msg=sync_msg)
             return self._err('Row index out of range.')
         except Exception as exc:  # noqa: BLE001
@@ -1227,6 +1237,8 @@ class Api:
                         sync_msg = f'Local added, Dataverse sync notice: {dv_exc}'
 
             data.insert(0, new_row)
+            if kind == 'team' and self.productivity:
+                self._refresh_productivity_team_derivations()
             return self._ok(count=len(data), synced=synced, msg=sync_msg)
         except Exception as exc:  # noqa: BLE001
             return self._err(exc)
@@ -1251,6 +1263,8 @@ class Api:
                         sync_msg = f'Local deleted, Dataverse sync notice: {dv_exc}'
 
                 data.pop(row_index)
+                if kind == 'team' and self.productivity:
+                    self._refresh_productivity_team_derivations()
                 return self._ok(count=len(data), synced=synced, msg=sync_msg)
             return self._err('Row index out of range.')
         except Exception as exc:  # noqa: BLE001
@@ -1326,6 +1340,8 @@ class Api:
 
                 # Replace in-memory rows
                 setattr(self, self._REF_ATTR[kind], data)
+                if kind == 'team' and self.productivity:
+                    self._refresh_productivity_team_derivations()
                 fname = os.path.basename(path)
                 self.ref_sources[kind] = f"File: {fname}"
                 self.remembered[kind] = path
@@ -1650,6 +1666,8 @@ class Api:
                 self._pending_ref_sync = None
                 try:
                     setattr(self, self._REF_ATTR[kind], self.dv_client.load_arbitrary_reference_table(target, kind))
+                    if kind == 'team' and self.productivity:
+                        self._refresh_productivity_team_derivations()
                 except Exception:  # noqa: BLE001
                     pass
                 errs = res.get('errors') or []
@@ -1882,20 +1900,22 @@ class Api:
 
         return self._async(worker)
 
+    def _refresh_productivity_team_derivations(self):
+        """Refresh only Team Composition-derived productivity fields in place."""
+        lookup = pt.build_team_lookup(self.teams)
+        for row in self.productivity:
+            pt.apply_team_lookup_to_productivity_row(row, lookup)
+
     def update_matched(self, index, name):
         try:
             index = int(index)
             if index < 0 or index >= len(self.productivity):
                 return self._err('Row out of range.')
-            lookup = pt.build_team_lookup(self.teams)
-            defaults = lookup.get((name or '').strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
             row = self.productivity[index]
             row['MATCHED NEGOTIATOR NAME'] = name
-            row['CORRECT TEAM'] = defaults['correctTeam']
-            row['TEAM MATCH'] = pt.get_match_status(pt.normalize_team(row.get('TEAM')), defaults['correctTeam'])
-            row['CORRECT GROUP'] = defaults['correctGroup']
-            row['GROUP MATCH'] = pt.get_match_status(pt.normalize_group(row.get('GROUP')), defaults['correctGroup'])
-            return {'ok': True, 'row': self._productivity_row_cells(row)}
+            pt.apply_team_lookup_to_productivity_row(row, pt.build_team_lookup(self.teams))
+            return {'ok': True, 'row': self._productivity_row_cells(row),
+                    'memoError': row.get('_MEMO_REF_ERROR', '')}
         except Exception as exc:  # noqa: BLE001
             return self._err(exc)
 
@@ -2053,6 +2073,9 @@ class Api:
                     reason = pt.date_cell_error(k, val)
                     if reason:
                         bad.append(f"{k} = '{val}' ({reason})")
+            memo_error = str(row.get('_MEMO_REF_ERROR', '') or '').strip()
+            if memo_error:
+                bad.append(f'MEMO REF: {memo_error}')
             if bad:
                 hard_errors.append({'row': row_num, 'label': label, 'issues': bad})
                 continue
@@ -2084,6 +2107,10 @@ class Api:
             rows = self._rows_for_stage(workspace_mode)
             if not rows:
                 return self._err('No records in workspace to validate.')
+            if workspace_mode != 'review':
+                memo_target_error = self._productivity_memo_target_error(target)
+                if memo_target_error:
+                    return self._err(memo_target_error)
             override = bool(override)
             # Override needs the key->record-id map (to know what to PATCH); the plain
             # skip path only needs the key set. Cache both so the publish that follows
@@ -2122,7 +2149,20 @@ class Api:
         if workspace_mode == 'review':
             return self.calculated if self.has_calculated else self.rows
         columns = pt.get_output_columns(self.mode)
-        return [{c: r.get(c, '') for c in columns} for r in self.productivity]
+        return [{**{c: r.get(c, '') for c in columns},
+                 '_MEMO_REF_ERROR': r.get('_MEMO_REF_ERROR', '')}
+                for r in self.productivity]
+
+    def _productivity_memo_target_error(self, target: str) -> str:
+        """Return a clear error if the target cannot accept Memo Ref."""
+        if not self.dv_client:
+            return 'Please connect to Dataverse first.'
+        memo_attr = self.dv_client.get_writable_attribute(
+            target, 'MEMO REF', 'Memo Ref', 'cr63f_memoref')
+        if not memo_attr:
+            return ('The selected productivity table does not contain a writable '
+                    'Memo Ref column.')
+        return ''
 
     def _publish_stage(self, workspace_mode, target, reassign_ids=False, override=False):
         """Shared worker for both publish stages. Returns a receipt dict.
@@ -2134,6 +2174,10 @@ class Api:
         rows = self._rows_for_stage(workspace_mode)
         if not rows:
             return {'ok': False, 'error': 'No records to publish.'}
+        if workspace_mode != 'review':
+            memo_target_error = self._productivity_memo_target_error(target)
+            if memo_target_error:
+                return {'ok': False, 'error': memo_target_error}
 
         override = bool(override)
         # Partition FIRST, against the same rows/IDs validation used, so the
@@ -2663,8 +2707,12 @@ class Api:
         editable_index = columns.index('MATCHED NEGOTIATOR NAME') if 'MATCHED NEGOTIATOR NAME' in columns else -1
         match_cols = [i for i, c in enumerate(columns) if c in ('TEAM MATCH', 'GROUP MATCH')]
         meta = {c: pt.get_column_type_and_choices(c, self.mode, self.teams, self.municipality_codes, self.mapping_statuses, self.build_rows) for c in columns}
+        memo_errors = {str(i): str(row.get('_MEMO_REF_ERROR', '') or '')
+                       for i, row in enumerate(self.productivity)
+                       if str(row.get('_MEMO_REF_ERROR', '') or '')}
         return {'columns': columns, 'labels': labels, 'rows': rows,
-                'matchedIndex': editable_index, 'matchColumns': match_cols, 'meta': meta}
+                'matchedIndex': editable_index, 'matchColumns': match_cols,
+                'meta': meta, 'memoErrors': memo_errors}
 
     def _productivity_row_cells(self, row):
         columns = pt.get_output_columns(self.mode)
@@ -2682,13 +2730,9 @@ class Api:
 
             # If matched negotiator was edited, update correct team, correct group, team match, group match
             if key in ('MATCHED NEGOTIATOR NAME', 'MATCHED SOURCER', 'NEGOTIATOR NAME', 'LSA NAME'):
-                lookup = pt.build_team_lookup(self.teams)
                 matched_name = row.get('MATCHED NEGOTIATOR NAME') or row.get('NEGOTIATOR NAME') or row.get('LSA NAME') or ''
-                defaults = lookup.get(matched_name.strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
-                row['CORRECT TEAM'] = defaults['correctTeam']
-                row['TEAM MATCH'] = pt.get_match_status(pt.normalize_team(row.get('TEAM')), defaults['correctTeam'])
-                row['CORRECT GROUP'] = defaults['correctGroup']
-                row['GROUP MATCH'] = pt.get_match_status(pt.normalize_group(row.get('GROUP')), defaults['correctGroup'])
+                row['MATCHED NEGOTIATOR NAME'] = matched_name
+                pt.apply_team_lookup_to_productivity_row(row, pt.build_team_lookup(self.teams))
 
             elif key == 'TEAM':
                 val_clean = pt.normalize_team(val_clean)
@@ -2714,6 +2758,7 @@ class Api:
                 'state': self.state(),
                 'table': self._productivity_table(),
                 'row': self._productivity_row_cells(row),
+                'memoError': row.get('_MEMO_REF_ERROR', ''),
                 'msg': f'Updated {key}.'
             }
         except Exception as exc:  # noqa: BLE001

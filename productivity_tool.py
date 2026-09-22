@@ -1307,22 +1307,18 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> l
         matched = str(row.get('MATCHED NEGOTIATOR NAME', '') or '').strip()
         if not matched:
             matched = get_fuzzy_negotiator_match(str(row.get('NEGOTIATOR NAME', '') or ''), negotiator_options)
-        defaults = lookup.get(matched.strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
         team_val = normalize_team(row.get('TEAM'))
         group_val = normalize_group(row.get('GROUP'))
-        enriched.append({
+        enriched_row = {
             **row,
             'ITEM #': row.get('ITEM #', index + 1),
             'MATCHED NEGOTIATOR NAME': matched,
             'TEAM': team_val,
-            'CORRECT TEAM': defaults['correctTeam'],
-            'TEAM MATCH': get_match_status(team_val, defaults['correctTeam']),
             'GROUP': group_val,
-            'CORRECT GROUP': defaults['correctGroup'],
-            'GROUP MATCH': get_match_status(group_val, defaults['correctGroup']),
             # workspace loadProductivityRows rounds LO COUNT BY DAY to a whole number
             'LO COUNT BY DAY': round_whole_number_text(row.get('LO COUNT BY DAY')),
-        })
+        }
+        enriched.append(apply_team_lookup_to_productivity_row(enriched_row, lookup))
     return enriched
 
 
@@ -1332,7 +1328,7 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> l
 
 OUTPUT_COLUMNS = [
     'ITEM #', 'AREA INDEX', 'NEGO DATE', 'WORK WEEK', 'PROVINCE', 'MUNICIPALITY', 'BARANGAY', 'TYPE OF REPORT', 'ACTION',
-    'NEGOTIATOR NAME', 'NEGO CODE', 'MATCHED NEGOTIATOR NAME', 'TEAM', 'CORRECT TEAM', 'TEAM MATCH', 'GROUP',
+    'NEGOTIATOR NAME', 'NEGO CODE', 'MATCHED NEGOTIATOR NAME', 'MEMO REF', 'TEAM', 'CORRECT TEAM', 'TEAM MATCH', 'GROUP',
     'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'LO', 'POINTS',
     'LO OCCURRENCE BY DAY', 'LO OCCURRENCE BY WW', 'LO POINTS BY DAY', 'LO POINTS BY WW', 'LO COUNT BY DAY', 'LO COUNT BY WW',
 ]
@@ -1432,7 +1428,8 @@ def load_reference_workbook(path: str):
             for d in dicts:
                 teams.append({'employeeName': _pick(d, 'Employee Name', 'Name', 'Negotiator', 'LSA Name', 'Negotiator Name'),
                               'team': normalize_team(_pick(d, 'Team')), 'group': normalize_group(_pick(d, 'Group')),
-                              'dept': _pick(d, 'Department', 'Dept', 'DEPARTMENT', 'DEPT')})
+                              'dept': _pick(d, 'Department', 'Dept', 'DEPARTMENT', 'DEPT'),
+                              'memoNo': _pick(d, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo')})
         elif 'MUNICIPAL' in title or 'MUNI' in title:
             for d in dicts:
                 municipality_codes.append({'municipality': _pick(d, 'Municipality'),
@@ -1458,7 +1455,7 @@ def load_reference_workbook(path: str):
 
 # Per-source reference table definitions ------------------------------------
 REFERENCE_TEMPLATE_HEADERS = {
-    'team': ['Employee Name', 'Team', 'Group', 'Department'],
+    'team': ['Employee Name', 'Team', 'Group', 'Department', 'Memo No.'],
     'municipality': ['Municipality', 'MuniCode', 'Province'],
     'mapping': ['Description', 'Mapping Status', 'Data Usability'],
     'build': ['Area Index', 'Build', 'Work Week'],
@@ -1466,7 +1463,7 @@ REFERENCE_TEMPLATE_HEADERS = {
 }
 
 REFERENCE_VIEW_COLUMNS = {
-    'team': [('employeeName', 'Employee Name'), ('team', 'Team'), ('group', 'Group'), ('dept', 'Department')],
+    'team': [('employeeName', 'Employee Name'), ('team', 'Team'), ('group', 'Group'), ('dept', 'Department'), ('memoNo', 'Memo No.')],
     'municipality': [('municipality', 'Municipality'), ('muniCode', 'MuniCode'), ('province', 'Province')],
     'mapping': [('description', 'Description'), ('mappingLabel', 'Mapping Status'), ('dataUsability', 'Data Usability')],
     'build': [('areaIndex', 'Area Index'), ('build', 'Build'), ('workWeek', 'Work Week')],
@@ -1515,6 +1512,7 @@ def load_single_reference(path: str, kind: str) -> list[dict]:
                 'team': normalize_team(_pick(d, 'Team', 'TEAM', 'Team Name', 'TEAM NAME')),
                 'group': normalize_group(_pick(d, 'Group', 'GROUP', 'Group Name', 'GROUP NAME')),
                 'dept': _pick(d, 'Department', 'DEPARTMENT', 'Dept', 'DEPT', 'Department Name'),
+                'memoNo': _pick(d, 'Memo No.', 'MEMO NO.', 'Memo No', 'MEMO NO', 'Memo Number', 'MEMO NUMBER', 'Memo #', 'MemoNo'),
             })
         return [r for r in out if r['employeeName']]
     if kind == 'municipality':
@@ -1931,13 +1929,63 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
 
 
 def build_team_lookup(teams: list[dict]) -> dict:
-    lookup = {}
+    """Index Team Composition and resolve Memo No. duplicates safely.
+
+    Blank duplicate values are ignored. Identical non-blank values are safe;
+    distinct non-blank values make the employee ambiguous.
+    """
+    grouped: dict[str, list[dict]] = collections.defaultdict(list)
     for t in teams:
         name = (t.get('employeeName', '') or '').strip()
         if name:
-            lookup[name.lower()] = {'correctTeam': normalize_team(t.get('team', '')),
-                                    'correctGroup': normalize_group(t.get('group', ''))}
+            grouped[name.lower()].append(t)
+
+    lookup = {}
+    for name_key, matches in grouped.items():
+        # Preserve the existing last-row behavior for Team/Group while Memo No.
+        # is resolved deliberately across every duplicate employee row.
+        selected = matches[-1]
+        memo_by_norm = {}
+        for item in matches:
+            memo = str(item.get('memoNo', '') or '').strip()
+            if memo:
+                memo_by_norm.setdefault(memo.lower(), memo)
+        memo_values = list(memo_by_norm.values())
+        memo_ambiguous = len(memo_values) > 1
+        memo_ref = memo_values[0] if len(memo_values) == 1 else ''
+        memo_error = ''
+        if memo_ambiguous:
+            employee = str(selected.get('employeeName', '') or name_key).strip()
+            memo_error = (f"Conflicting Memo No. values for {employee}: "
+                          + ', '.join(memo_values)
+                          + '. Correct Team Composition and refresh it before publishing.')
+        lookup[name_key] = {
+            'correctTeam': normalize_team(selected.get('team', '')),
+            'correctGroup': normalize_group(selected.get('group', '')),
+            'memoRef': memo_ref,
+            'memoAmbiguous': memo_ambiguous,
+            'memoValues': memo_values,
+            'memoError': memo_error,
+        }
     return lookup
+
+
+def apply_team_lookup_to_productivity_row(row: dict, lookup: dict) -> dict:
+    """Refresh Team/Group/Memo-derived fields on one productivity row in place."""
+    matched = str(row.get('MATCHED NEGOTIATOR NAME', '') or '').strip()
+    defaults = lookup.get(matched.lower(), {
+        'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0',
+        'memoRef': '', 'memoAmbiguous': False, 'memoValues': [], 'memoError': '',
+    })
+    team_val = normalize_team(row.get('TEAM'))
+    group_val = normalize_group(row.get('GROUP'))
+    row['CORRECT TEAM'] = defaults['correctTeam']
+    row['TEAM MATCH'] = get_match_status(team_val, defaults['correctTeam'])
+    row['CORRECT GROUP'] = defaults['correctGroup']
+    row['GROUP MATCH'] = get_match_status(group_val, defaults['correctGroup'])
+    row['MEMO REF'] = str(defaults.get('memoRef', '') or '').strip()
+    row['_MEMO_REF_ERROR'] = str(defaults.get('memoError', '') or '')
+    return row
 
 
 def negotiator_options(teams: list[dict], mode: str = 'negotiation') -> list[str]:

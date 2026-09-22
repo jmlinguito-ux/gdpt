@@ -685,6 +685,7 @@ class DataverseClient:
             'MATCHED NEGOTIATOR NAME': ['MATCHED NEGOTIATOR NAME', 'MATCHED NEGOTIATOR', 'MATCHED SOURCER', 'MATCHED SOURCER NAME', 'cr63f_matchednegotiator', 'cr63f_matchedsourcer', 'cr63f_matchednegotiatorname', 'cr63f_matchedsourcername'],
             'MATCHED SOURCER': ['MATCHED SOURCER', 'MATCHED SOURCER NAME', 'MATCHED NEGOTIATOR', 'MATCHED NEGOTIATOR NAME', 'cr63f_matchedsourcer', 'cr63f_matchednegotiator', 'cr63f_matchedsourcername', 'cr63f_matchednegotiatorname'],
             'MATCHED SOURCER NAME': ['MATCHED SOURCER NAME', 'MATCHED SOURCER', 'MATCHED NEGOTIATOR', 'MATCHED NEGOTIATOR NAME', 'cr63f_matchedsourcer', 'cr63f_matchednegotiator', 'cr63f_matchedsourcername', 'cr63f_matchednegotiatorname'],
+            'MEMO REF': ['MEMO REF', 'Memo Ref', 'cr63f_memoref'],
             'NEGO DISTINCTION': ['NEGO DISTINCTION', 'SOURCING DISTINCTION', 'DISTINCTION', 'cr63f_sourcingdistinction', 'cr63f_negodistinction', 'cr63f_distinction'],
             'SOURCING DISTINCTION': ['SOURCING DISTINCTION', 'NEGO DISTINCTION', 'DISTINCTION', 'cr63f_sourcingdistinction', 'cr63f_negodistinction', 'cr63f_distinction'],
             'NEGO CODE': ['NEGO CODE', 'SOURCER CODE', 'SOURCING CODE', 'CODE', 'cr63f_sourcercode', 'cr63f_negocode', 'cr63f_code'],
@@ -734,6 +735,15 @@ class DataverseClient:
 
         return {'info': info, 'entity_set': entity_set, 'pk': pk,
                 'col_map': col_map, 'date_attrs': date_attrs, 'date_text_attrs': date_text_attrs}
+
+    def get_writable_attribute(self, entity_logical: str, *candidate_names: str) -> dict | None:
+        """Return an attribute only when it supports both create and update."""
+        meta = self._resolve(entity_logical, *candidate_names)
+        if not meta:
+            return None
+        if meta.get('isValidForCreate') is False or meta.get('isValidForUpdate') is False:
+            return None
+        return meta
 
     def _row_to_payload(self, row: dict, ctx: dict) -> dict:
         """Build the raw (unformatted) create payload for one row."""
@@ -1108,6 +1118,7 @@ class DataverseClient:
             'team': ('Team', 'Team Name'),
             'group': ('Group', 'Group Name'),
             'dept': ('Department', 'Dept', 'Department Name'),
+            'memoNo': ('Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo'),
         },
         'municipality': {
             'municipality': ('Municipality', 'City', 'Town'),
@@ -1152,10 +1163,11 @@ class DataverseClient:
         team = self._resolve(ent, 'Team')
         group = self._resolve(ent, 'Group')
         dept = self._resolve(ent, 'Department', 'Dept')
-        select = [_select_name(c) for c in (name, team, group, dept) if c]
+        memo_no = self._resolve(ent, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo')
+        select = [_select_name(c) for c in (name, team, group, dept, memo_no) if c]
         if pk and pk not in select:
             select.append(pk)
-        rows = self._get_all(info['entitySetName'], select, formatted=_needs_formatting(name, team, group, dept))
+        rows = self._get_all(info['entitySetName'], select, formatted=_needs_formatting(name, team, group, dept, memo_no))
         out = []
         for r in rows:
             out.append({
@@ -1163,6 +1175,7 @@ class DataverseClient:
                 'team': _formatted(r, team['logical']) if team else '',
                 'group': _formatted(r, group['logical']) if group else '',
                 'dept': _formatted(r, dept['logical']) if dept else '',
+                'memoNo': _formatted(r, memo_no['logical']) if memo_no else '',
                 '_record_id': _s(r.get(pk)),
                 '_entity_logical': ent,
             })
@@ -1954,14 +1967,16 @@ class DataverseClient:
             team = self._resolve(logical_name, 'Team', 'Team Name')
             group = self._resolve(logical_name, 'Group', 'Group Name')
             dept = self._resolve(logical_name, 'Department', 'Dept')
-            select = [_select_name(c) for c in (name, team, group, dept) if c]
+            memo_no = self._resolve(logical_name, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo')
+            select = [_select_name(c) for c in (name, team, group, dept, memo_no) if c]
             if pk and pk not in select:
                 select.append(pk)
-            rows = self._get_all(entity_set, select, formatted=_needs_formatting(name, team, group, dept))
+            rows = self._get_all(entity_set, select, formatted=_needs_formatting(name, team, group, dept, memo_no))
             out = [{'employeeName': _formatted(r, name['logical']) if name else '',
                     'team': _formatted(r, team['logical']) if team else '',
                     'group': _formatted(r, group['logical']) if group else '',
                     'dept': _formatted(r, dept['logical']) if dept else '',
+                    'memoNo': _formatted(r, memo_no['logical']) if memo_no else '',
                     '_record_id': _s(r.get(pk)),
                     '_entity_logical': logical_name} for r in rows]
             return [r for r in out if r['employeeName']]
