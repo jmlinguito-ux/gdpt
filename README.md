@@ -143,7 +143,7 @@ each card (or the ready-made files in `templates/`) and fill in the rows:
 
 | Table | Template file | Columns |
 |---|---|---|
-| Team Composition | `team-composition-template.csv` | Employee Name, Team, Group, Department, Memo No. |
+| Team Composition | `team-composition-template.csv` | Employee Name, Team, Group, Position |
 | Municipality Code | `municipality-code-template.csv` | Municipality, MuniCode, Province |
 | Mapping Status | `mapping-status-template.csv` | Description, Mapping Status, Data Usability |
 | Build Table | `build-table-template.csv` | Area Index, Build |

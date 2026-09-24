@@ -144,8 +144,8 @@
   // while app.js's getFrozenColOffset keys off the review/prod sets. Offsets have to
   // come from THIS set, otherwise frozen editor columns all stick to the same left
   // edge and overlap the pinned ACT column.
-  function frozenOffsetLeft(colIdx, labelsOverride) {
-    const labels = labelsOverride || (table && table.labels) || [];
+  function frozenOffsetLeft(colIdx) {
+    const labels = (table && table.labels) || [];
     const set = frozenCols();
     let left = 0;
     for (let c = 0; c < colIdx && c < labels.length; c++) {
@@ -154,8 +154,8 @@
     return left;
   }
 
-  function isTrailingFrozen(colIdx, labelsOverride) {
-    const labels = labelsOverride || (table && table.labels) || [];
+  function isTrailingFrozen(colIdx) {
+    const labels = (table && table.labels) || [];
     const set = frozenCols();
     if (!set.has(labels[colIdx])) return false;
     for (let c = colIdx + 1; c < labels.length; c++) {
@@ -194,19 +194,13 @@
     head.innerHTML = '';
     const tr = document.createElement('tr');
 
-    const keys = (table && table.columns) || labels;
-    const order = (typeof getOrderedColumnIndices === 'function') ? getOrderedColumnIndices(TABLE_KEY, keys) : labels.map((_, i) => i);
-    const displayLabels = order.map(i => labels[i]);
-    order.forEach((colIdx) => {
-      const h = labels[colIdx];
+    labels.forEach((h, colIdx) => {
       const w = colWidth(h);
       const isFrozen = fz.has(h);
-      const displayIdx = order.indexOf(colIdx);
-      const isLastFrozen = isFrozen && isTrailingFrozen(displayIdx, displayLabels);
-      const left = frozenOffsetLeft(displayIdx, displayLabels);
+      const isLastFrozen = isFrozen && isTrailingFrozen(colIdx);
+      const left = frozenOffsetLeft(colIdx);
 
       const th = document.createElement('th');
-      th.dataset.colKey = String(keys[colIdx]);
       th.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
       th.style.width = `${w}px`; th.style.minWidth = `${w}px`; th.style.maxWidth = `${w}px`;
       th.style.height = `${headerHeight}px`;
@@ -224,7 +218,6 @@
               </svg>
             </button>
             <span class="th-col-name" data-freeze-editor="${colIdx}" title="Click to ${isFrozen ? 'unfreeze' : 'freeze'} ${escapeHtml(h)}">${escapeHtml(h)}</span>
-            ${typeof sortableHeaderButton === 'function' ? sortableHeaderButton(TABLE_KEY, keys[colIdx]) : ''}
             <button type="button" class="th-chevron-btn ${isFilterActive ? 'active' : ''}" data-filter-toggle-editor="${colIdx}" title="Filter column">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </button>
@@ -285,9 +278,8 @@
     if (clearBtn) clearBtn.disabled = !Object.values(filters).some(v => (v || '').trim() !== '');
 
     if (typeof attachHeaderResizers === 'function') {
-      attachHeaderResizers(grid, TABLE_KEY, [...displayLabels, 'ACT'], () => { renderHead(); renderBody(); });
+      attachHeaderResizers(grid, TABLE_KEY, [...labels, 'ACT'], () => { renderHead(); renderBody(); });
     }
-    if (typeof attachTableColumnControls === 'function') attachTableColumnControls(grid, TABLE_KEY, renderTable);
   }
 
   function renderBody() {
@@ -310,10 +302,6 @@
       }
       kept.push({ cells, origIdx });
     });
-    if (typeof sortTableItems === 'function') {
-      const sorted = sortTableItems(kept, TABLE_KEY, cols || labels, (item, idx) => item.cells[idx]);
-      kept.splice(0, kept.length, ...sorted);
-    }
 
     const shown = Math.min(kept.length, MAX_RENDER);
     const count = $('editorCount');
@@ -352,23 +340,19 @@
       const tr = document.createElement('tr');
       tr.dataset.rowIdx = origIdx;
 
-      const order = (typeof getOrderedColumnIndices === 'function') ? getOrderedColumnIndices(TABLE_KEY, cols || labels) : cells.map((_, i) => i);
-      const displayLabels = order.map(i => labels[i]);
-      order.forEach((ci) => {
-        const cell = cells[ci];
+      cells.forEach((cell, ci) => {
         const header = labels[ci];
         const logical = cols[ci];
         const w = colWidth(header);
         const isFrozen = fz.has(header);
-        const displayIdx = order.indexOf(ci);
-        const isLastFrozen = isFrozen && isTrailingFrozen(displayIdx, displayLabels);
+        const isLastFrozen = isFrozen && isTrailingFrozen(ci);
         const td = document.createElement('td');
         td.className = `${isFrozen ? 'col-frozen' : ''} ${isLastFrozen ? 'col-frozen-last' : ''}`;
         td.style.width = `${w}px`;
         td.style.minWidth = `${w}px`;
         td.style.maxWidth = `${w}px`;
         if (isFrozen && typeof getFrozenColOffset === 'function') {
-          td.style.left = `${frozenOffsetLeft(displayIdx, displayLabels)}px`;
+          td.style.left = `${frozenOffsetLeft(ci)}px`;
         }
         td.dataset.rowIdx = origIdx;
         td.dataset.colKey = logical;   // the shared selection layer keys off this

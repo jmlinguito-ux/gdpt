@@ -56,7 +56,7 @@ BATANGAS_NEGO_RECORD_COLUMNS = [
     'WITH OVERLAP ISSUE', 'LANDOWNER/AIF VERIFICATION', 'VERIFICATION OF HEIRS/AIF OF THE DECEASED RO/S',
     'HEIRS/AIF BASED ABROAD', 'NO NEXT OF KIN TO THE RO', 'AWAITING DECISION FROM THE LO', 'XCOORD', 'YCOORD',
     'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)',
-    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR',
+    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR',
 ]
 
 LAND_SOURCING_RECORD_COLUMNS = [
@@ -65,14 +65,14 @@ LAND_SOURCING_RECORD_COLUMNS = [
     'PROPERTY IDENTIFICATION NO (PIN)', 'REGISTERED OWNER', 'AUTHORIZED REPRESENTATIVE', 'TITLE TYPE', 'TITLE NO',
     'LOT AREA (SQM)', 'CLASSIFICATION', 'CLASS', 'INDICATIVE PRICE SALE', 'PAYMENT TERMS', 'NET OR GROSS',
     'INDICATIVE PRICE LEASE', 'CONTRACT TERMS (LEASE)', 'ESCALATION', 'XCOORD', 'YCOORD', 'MAPPING STATUS',
-    'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR',
+    'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR',
 ]
 
 DERIVED_TEMPLATE_COLUMNS = {'ID', 'MAPPING STATUS', 'MUNI CODE', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'LO'}
 OPTIONAL_UPLOAD_COLUMNS = {'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)', 'LO'}
 # Derived review columns that calculate_review_rows recomputes — a manual edit to
 # one of these is remembered in row['_overrides'] so re-calculating keeps it.
-DERIVED_REVIEW_COLUMNS = {'AREA-INDEX', 'MUNICODE', 'MAPPING STATUS', 'BUILD', 'DATA USABILITY', 'YEAR', 'LOT AREA (HA)'}
+DERIVED_REVIEW_COLUMNS = {'AREA-INDEX', 'MUNICODE', 'MAPPING STATUS', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'LOT AREA (HA)'}
 
 REQUIRED_COLUMNS_BY_MODE = {
     'negotiation': ['ID', 'NEGOTIATOR NAME', 'AREA-INDEX', 'NEGO DATE', 'CLASSIFICATION', 'MUNICIPALITY', 'DATA USABILITY'],
@@ -799,62 +799,101 @@ def _date_sort_key(val: str) -> str:
     return str(val or '').strip()
 
 
-def get_checker(row: dict, source_rows: list[dict], existing_records: list[dict] | None = None) -> str:
-    row_id = _get_row_order_key(row)
+def get_checker(row: dict, source_rows: list[dict], existing_records: list[dict] | None = None,
+                history_ready: bool = True, mode: str = 'negotiation') -> str:
+    if not history_ready:
+        return 'HISTORY REQUIRED'
+
     area_index = get_area_index(row).strip().lower()
     record_date_str = get_normalized_record_date(row)
     record_date_key = _date_sort_key(record_date_str)
+    current_class = str(row.get('classification', '') or row.get('CLASSIFICATION', '') or '').strip()
 
-    # 1. Collect all rows for this Area Index in the current uploaded batch
-    all_current_area = [it for it in source_rows if get_area_index(it).strip().lower() == area_index]
+    if not area_index or not record_date_key or not current_class:
+        return 'NEEDS REVIEW'
 
+    # Deduplicate existing history
+    seen_history_keys = set()
     all_existing_area = []
     if existing_records:
         for it in existing_records:
-            ai = (it.get('aREAINDEX') or it.get('AREA-INDEX') or it.get('AREA INDEX') or '').strip().lower()
-            if ai == area_index:
-                all_existing_area.append(it)
+            ai = (it.get('aREAINDEX') or it.get('AREA-INDEX') or it.get('AREA INDEX') or it.get('areaIndex') or '').strip().lower()
+            if ai != area_index:
+                continue
+            r_id = str(it.get('ID', '') or it.get('iD1', '') or it.get('cr63f_recordid', '') or it.get('cr63f_reportid', '') or it.get('_record_id', '')).strip()
+            d = get_normalized_record_date(it)
+            key = (r_id, d) if r_id else (d, str(it.get('classification', '') or it.get('CLASSIFICATION', '') or ''))
+            if key in seen_history_keys:
+                continue
+            seen_history_keys.add(key)
+            all_existing_area.append(it)
 
+    all_current_area = [it for it in source_rows if get_area_index(it).strip().lower() == area_index]
+
+    def _rec_id_val(r):
+        v = r.get('ID', r.get('iD1', r.get('cr63f_recordid', r.get('cr63f_reportid', None))))
+        if v is None or str(v).strip() == '':
+            return None
+        try:
+            return int(float(str(v).replace(',', '').strip()))
+        except (ValueError, TypeError):
+            return None
+
+    def _rec_sort_key(r):
+        num_id = _rec_id_val(r)
+        if num_id is not None:
+            return (0, num_id, _get_row_order_key(r))
+        return (1, 0, _get_row_order_key(r))
+
+    # Check same-day entries for this Area Index
+    same_day_records = []
+    for it in all_existing_area + all_current_area:
+        d_key = _date_sort_key(get_normalized_record_date(it))
+        if d_key == record_date_key:
+            same_day_records.append(it)
+
+    sorted_same_day = sorted(same_day_records, key=_rec_sort_key)
+
+    def _is_target_row(it, target):
+        if it is target:
+            return True
+        if it.get('_record_id') and it.get('_record_id') == target.get('_record_id'):
+            return True
+        if it.get('_row_id') is not None and it.get('_row_id') == target.get('_row_id'):
+            return True
+        t_id = _rec_id_val(target)
+        if t_id is not None and _rec_id_val(it) == t_id and _get_row_order_key(it) == _get_row_order_key(target):
+            return True
+        return False
+
+    for rank, it in enumerate(sorted_same_day, start=1):
+        if _is_target_row(it, row):
+            if rank > 1:
+                return ordinal_duplicate(rank - 1)
+            break
+
+    # If first on this date, check history for prior visit dates
     all_area_records = all_existing_area + all_current_area
+    prior_records = [
+        it for it in all_area_records
+        if _date_sort_key(get_normalized_record_date(it)) and _date_sort_key(get_normalized_record_date(it)) < record_date_key
+    ]
 
-    # 2. Check same-day entries for this Area Index STRICTLY within the current uploaded batch
-    if record_date_key:
-        same_day_current = [it for it in all_current_area
-                            if _date_sort_key(get_normalized_record_date(it)) == record_date_key]
-
-        # Check if there is any LATER record on the exact same date in this uploaded batch
-        subsequent_same_day = [it for it in same_day_current if _get_row_order_key(it) > row_id]
-
-        if subsequent_same_day:
-            # Earlier entries in the batch on the exact SAME date are duplicates (highest row# is retained)
-            prior_same_day = [it for it in same_day_current if _get_row_order_key(it) < row_id]
-            duplicate_num = len(prior_same_day) + 1
-            return ordinal_duplicate(duplicate_num)
-
-    # 3. This row is the first entry of the day for this Area Index.
-    # Check if there was ANY earlier visit on a prior date in history
-    prior_dates_records = [it for it in all_area_records
-                           if record_date_key and _date_sort_key(get_normalized_record_date(it)) and _date_sort_key(get_normalized_record_date(it)) < record_date_key]
-
-    if not prior_dates_records:
-        # Truly the very first contact EVER in history -> FIRST CONTACT
+    if not prior_records:
         return 'FIRST CONTACT'
 
-    # Sort prior date records by date descending, then ID descending to find the immediately preceding visit
     sorted_priors = sorted(
-        prior_dates_records,
-        key=lambda it: (
-            _date_sort_key(get_normalized_record_date(it)),
-            _to_int(it.get('ID', it.get('iD1', '0')))
-        ),
+        prior_records,
+        key=lambda it: (_date_sort_key(get_normalized_record_date(it)), _rec_sort_key(it)),
         reverse=True
     )
-
     preceding = sorted_priors[0]
-    preceding_class = str(preceding.get('classification', '') or preceding.get('CLASSIFICATION', '') or '').strip().lower()
-    current_class = str(row.get('classification', '') or row.get('CLASSIFICATION', '') or '').strip().lower()
+    preceding_class = str(preceding.get('classification', '') or preceding.get('CLASSIFICATION', '') or '').strip()
 
-    if current_class and preceding_class and current_class != preceding_class:
+    if not preceding_class:
+        return 'NEEDS REVIEW'
+
+    if current_class.upper() != preceding_class.upper():
         return 'REVISITED'
 
     return 'FOLLOW UP'
@@ -1124,7 +1163,7 @@ def get_nego_distinction(row: dict, rows: list[dict], existing_records: list[dic
 
 def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuses: list[dict],
                             existing_records: list[dict], municipality_codes: list[dict],
-                            mode: str = 'negotiation') -> list[dict]:
+                            mode: str = 'negotiation', history_ready: bool = True) -> list[dict]:
     # 1. Pre-index existing records and municipality lookups for O(1) speed
     existing_by_area: dict[str, list[dict]] = collections.defaultdict(list)
     for r in (existing_records or []):
@@ -1176,7 +1215,12 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
         checker_row = {**row, 'AREA INDEX': derived_area_index, 'AREA-INDEX': derived_area_index}
         
         # Scoped to matching Area Index for O(1) lookup
-        checker = get_checker(checker_row, source_by_area.get(ai_key, []), existing_by_area.get(ai_key, []))
+        if not history_ready:
+            checker = 'HISTORY REQUIRED'
+        elif row.get('CHECKER'):
+            checker = row.get('CHECKER')
+        else:
+            checker = get_checker(checker_row, source_by_area.get(ai_key, []), existing_by_area.get(ai_key, []), history_ready=history_ready, mode=mode)
         data_usability = row.get('DATA USABILITY') or get_derived_data_usability(row, mapping_statuses, None, existing_records, municipality_codes)
 
         for name in names_to_render:
@@ -1307,18 +1351,22 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> l
         matched = str(row.get('MATCHED NEGOTIATOR NAME', '') or '').strip()
         if not matched:
             matched = get_fuzzy_negotiator_match(str(row.get('NEGOTIATOR NAME', '') or ''), negotiator_options)
+        defaults = lookup.get(matched.strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
         team_val = normalize_team(row.get('TEAM'))
         group_val = normalize_group(row.get('GROUP'))
-        enriched_row = {
+        enriched.append({
             **row,
             'ITEM #': row.get('ITEM #', index + 1),
             'MATCHED NEGOTIATOR NAME': matched,
             'TEAM': team_val,
+            'CORRECT TEAM': defaults['correctTeam'],
+            'TEAM MATCH': get_match_status(team_val, defaults['correctTeam']),
             'GROUP': group_val,
+            'CORRECT GROUP': defaults['correctGroup'],
+            'GROUP MATCH': get_match_status(group_val, defaults['correctGroup']),
             # workspace loadProductivityRows rounds LO COUNT BY DAY to a whole number
             'LO COUNT BY DAY': round_whole_number_text(row.get('LO COUNT BY DAY')),
-        }
-        enriched.append(apply_team_lookup_to_productivity_row(enriched_row, lookup))
+        })
     return enriched
 
 
@@ -1328,7 +1376,7 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> l
 
 OUTPUT_COLUMNS = [
     'ITEM #', 'AREA INDEX', 'NEGO DATE', 'WORK WEEK', 'PROVINCE', 'MUNICIPALITY', 'BARANGAY', 'TYPE OF REPORT', 'ACTION',
-    'NEGOTIATOR NAME', 'NEGO CODE', 'MATCHED NEGOTIATOR NAME', 'MEMO REF', 'TEAM', 'CORRECT TEAM', 'TEAM MATCH', 'GROUP',
+    'NEGOTIATOR NAME', 'NEGO CODE', 'MATCHED NEGOTIATOR NAME', 'TEAM', 'CORRECT TEAM', 'TEAM MATCH', 'GROUP',
     'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'LO', 'POINTS',
     'LO OCCURRENCE BY DAY', 'LO OCCURRENCE BY WW', 'LO POINTS BY DAY', 'LO POINTS BY WW', 'LO COUNT BY DAY', 'LO COUNT BY WW',
 ]
@@ -1428,8 +1476,7 @@ def load_reference_workbook(path: str):
             for d in dicts:
                 teams.append({'employeeName': _pick(d, 'Employee Name', 'Name', 'Negotiator', 'LSA Name', 'Negotiator Name'),
                               'team': normalize_team(_pick(d, 'Team')), 'group': normalize_group(_pick(d, 'Group')),
-                              'dept': _pick(d, 'Department', 'Dept', 'DEPARTMENT', 'DEPT'),
-                              'memoNo': _pick(d, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo')})
+                              'dept': _pick(d, 'Department', 'Dept', 'DEPARTMENT', 'DEPT')})
         elif 'MUNICIPAL' in title or 'MUNI' in title:
             for d in dicts:
                 municipality_codes.append({'municipality': _pick(d, 'Municipality'),
@@ -1455,7 +1502,7 @@ def load_reference_workbook(path: str):
 
 # Per-source reference table definitions ------------------------------------
 REFERENCE_TEMPLATE_HEADERS = {
-    'team': ['Employee Name', 'Team', 'Group', 'Department', 'Memo No.'],
+    'team': ['Employee Name', 'Team', 'Group', 'Department'],
     'municipality': ['Municipality', 'MuniCode', 'Province'],
     'mapping': ['Description', 'Mapping Status', 'Data Usability'],
     'build': ['Area Index', 'Build', 'Work Week'],
@@ -1463,7 +1510,7 @@ REFERENCE_TEMPLATE_HEADERS = {
 }
 
 REFERENCE_VIEW_COLUMNS = {
-    'team': [('employeeName', 'Employee Name'), ('team', 'Team'), ('group', 'Group'), ('dept', 'Department'), ('memoNo', 'Memo No.')],
+    'team': [('employeeName', 'Employee Name'), ('team', 'Team'), ('group', 'Group'), ('dept', 'Department')],
     'municipality': [('municipality', 'Municipality'), ('muniCode', 'MuniCode'), ('province', 'Province')],
     'mapping': [('description', 'Description'), ('mappingLabel', 'Mapping Status'), ('dataUsability', 'Data Usability')],
     'build': [('areaIndex', 'Area Index'), ('build', 'Build'), ('workWeek', 'Work Week')],
@@ -1512,7 +1559,6 @@ def load_single_reference(path: str, kind: str) -> list[dict]:
                 'team': normalize_team(_pick(d, 'Team', 'TEAM', 'Team Name', 'TEAM NAME')),
                 'group': normalize_group(_pick(d, 'Group', 'GROUP', 'Group Name', 'GROUP NAME')),
                 'dept': _pick(d, 'Department', 'DEPARTMENT', 'Dept', 'DEPT', 'Department Name'),
-                'memoNo': _pick(d, 'Memo No.', 'MEMO NO.', 'Memo No', 'MEMO NO', 'Memo Number', 'MEMO NUMBER', 'Memo #', 'MemoNo'),
             })
         return [r for r in out if r['employeeName']]
     if kind == 'municipality':
@@ -1788,7 +1834,7 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
         return {'type': 'choice', 'choices': sorted(group_choices)}
 
     if col_upper == 'CHECKER':
-        return {'type': 'choice', 'choices': ['FIRST CONTACT', 'FOLLOW UP', 'REVISITED', '1ST DUPLICATE', '2ND DUPLICATE', '3RD DUPLICATE']}
+        return {'type': 'text'}
 
     if col_upper in ('SOURCING DISTINCTION', 'NEGO DISTINCTION', 'DISTINCTION'):
         if mode == 'land-sourcing':
@@ -1929,63 +1975,13 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
 
 
 def build_team_lookup(teams: list[dict]) -> dict:
-    """Index Team Composition and resolve Memo No. duplicates safely.
-
-    Blank duplicate values are ignored. Identical non-blank values are safe;
-    distinct non-blank values make the employee ambiguous.
-    """
-    grouped: dict[str, list[dict]] = collections.defaultdict(list)
+    lookup = {}
     for t in teams:
         name = (t.get('employeeName', '') or '').strip()
         if name:
-            grouped[name.lower()].append(t)
-
-    lookup = {}
-    for name_key, matches in grouped.items():
-        # Preserve the existing last-row behavior for Team/Group while Memo No.
-        # is resolved deliberately across every duplicate employee row.
-        selected = matches[-1]
-        memo_by_norm = {}
-        for item in matches:
-            memo = str(item.get('memoNo', '') or '').strip()
-            if memo:
-                memo_by_norm.setdefault(memo.lower(), memo)
-        memo_values = list(memo_by_norm.values())
-        memo_ambiguous = len(memo_values) > 1
-        memo_ref = memo_values[0] if len(memo_values) == 1 else ''
-        memo_error = ''
-        if memo_ambiguous:
-            employee = str(selected.get('employeeName', '') or name_key).strip()
-            memo_error = (f"Conflicting Memo No. values for {employee}: "
-                          + ', '.join(memo_values)
-                          + '. Correct Team Composition and refresh it before publishing.')
-        lookup[name_key] = {
-            'correctTeam': normalize_team(selected.get('team', '')),
-            'correctGroup': normalize_group(selected.get('group', '')),
-            'memoRef': memo_ref,
-            'memoAmbiguous': memo_ambiguous,
-            'memoValues': memo_values,
-            'memoError': memo_error,
-        }
+            lookup[name.lower()] = {'correctTeam': normalize_team(t.get('team', '')),
+                                    'correctGroup': normalize_group(t.get('group', ''))}
     return lookup
-
-
-def apply_team_lookup_to_productivity_row(row: dict, lookup: dict) -> dict:
-    """Refresh Team/Group/Memo-derived fields on one productivity row in place."""
-    matched = str(row.get('MATCHED NEGOTIATOR NAME', '') or '').strip()
-    defaults = lookup.get(matched.lower(), {
-        'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0',
-        'memoRef': '', 'memoAmbiguous': False, 'memoValues': [], 'memoError': '',
-    })
-    team_val = normalize_team(row.get('TEAM'))
-    group_val = normalize_group(row.get('GROUP'))
-    row['CORRECT TEAM'] = defaults['correctTeam']
-    row['TEAM MATCH'] = get_match_status(team_val, defaults['correctTeam'])
-    row['CORRECT GROUP'] = defaults['correctGroup']
-    row['GROUP MATCH'] = get_match_status(group_val, defaults['correctGroup'])
-    row['MEMO REF'] = str(defaults.get('memoRef', '') or '').strip()
-    row['_MEMO_REF_ERROR'] = str(defaults.get('memoError', '') or '')
-    return row
 
 
 def negotiator_options(teams: list[dict], mode: str = 'negotiation') -> list[str]:
@@ -1997,7 +1993,8 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
                           build_rows: list[dict], existing_records: list[dict],
                           existing_area_set: set[str] | None = None,
                           ignore_build_work_week: bool = False,
-                          mode: str = 'negotiation') -> list[dict]:
+                          mode: str = 'negotiation',
+                          history_ready: bool = True) -> list[dict]:
     """Apply the review-table derivations (runReviewCalculations)."""
     if existing_area_set is None and existing_records:
         existing_area_set = {
@@ -2054,6 +2051,7 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
                                        build_first_by_area=build_first_by_area,
                                        build_by_area_and_ww=build_by_area_and_ww),
             'DATA USABILITY': derived_du,
+            'CHECKER': get_checker(row, area_calculated, existing_records, history_ready=history_ready, mode=mode),
             'YEAR': get_year_from_row_date(row),
             'LOT AREA (HA)': get_lot_area_ha(row.get('LOT AREA (SQM)', '') or ''),
         }

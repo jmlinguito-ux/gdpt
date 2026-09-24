@@ -143,6 +143,7 @@ class Api:
         self.existing_name = ''
         self.dv_client = None
         self.ref_sources: dict = {}
+        self._checker_history_scope: tuple[str, set[str]] | None = None
 
         # persisted reference file paths -> auto-load on startup
         self.settings = self._read_settings()
@@ -653,18 +654,16 @@ class Api:
 
         kinds_to_load = selected_kinds if selected_kinds is not None else ['team', 'municipality', 'mapping', 'build', 'existing']
 
-        # A user may have added or renamed a Dataverse column since this app
-        # connected. "Refresh from Dataverse" must re-read attribute metadata,
-        # otherwise the session-level cache would hide the new field until the
-        # application was restarted.
-        self.dv_client.clear_metadata_cache()
-
         def load_one(kind):
             """Fetch one reference table. Returns (kind, label, rows) for the caller
             to apply on the main worker thread."""
             logical = mappings.get(kind, '').strip() if mappings else ''
             if logical:
-                return kind, logical, self.dv_client.load_arbitrary_reference_table(logical, kind), None
+                data = self.dv_client.load_arbitrary_reference_table(logical, kind)
+                area_set = None
+                if kind == 'existing' and data:
+                    area_set = {str(r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex') or '').strip().lower() for r in data if (r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex'))}
+                return kind, logical, data, area_set
             if kind == 'team':
                 return kind, 'teamcomposition', self.dv_client.get_team_composition(), None
             if kind == 'municipality':
@@ -688,8 +687,9 @@ class Api:
                 # No file loaded yet, so this is viewer-only data: the existence
                 # check uses the bounded check_existing_area_indexes() query once
                 # a file arrives. Cap it instead of paging the whole table.
-                return kind, 'existingrecords', self.dv_client.get_existing_records(
-                    self.mode, limit=self.EXISTING_PREVIEW_LIMIT), None
+                recs = self.dv_client.get_existing_records(self.mode, limit=self.EXISTING_PREVIEW_LIMIT)
+                area_set = {str(r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex') or '').strip().lower() for r in recs if (r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex'))}
+                return kind, 'existingrecords', recs, area_set
             return kind, kind, [], None
 
         self.ref_tables_loading = True
@@ -702,18 +702,17 @@ class Api:
                 with cf.ThreadPoolExecutor(max_workers=min(5, len(kinds_to_load) or 1)) as pool:
                     for kind, label, data, area_set in pool.map(load_one, kinds_to_load):
                         setattr(self, self._REF_ATTR[kind], data)
-                        if kind == 'team' and self.productivity:
-                            self._refresh_productivity_team_derivations()
                         if kind == 'existing':
                             self.existing_count = len(data)
+                            if area_set is not None:
+                                self.existing_area_set = area_set
+                            elif data:
+                                self.existing_area_set = {str(r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex') or '').strip().lower() for r in data if (r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex'))}
+                            self._dedup_records = data
+                            self._dedup_area_set = self.existing_area_set
+                            self._checker_history_scope = (self.mode, self.existing_area_set)
                         mapped = mappings.get(kind, '').strip() if mappings else ''
                         self.ref_sources[kind] = f"Dataverse: {mapped}" if mapped else 'Dataverse (live)'
-                        if area_set is not None:
-                            self.existing_area_set = area_set
-                            # Explicit Existing Records fetch (with a file loaded) also
-                            # refreshes the dedup history.
-                            self._dedup_records = data
-                            self._dedup_area_set = area_set
                         results[kind] = (label, len(data))
 
                 summary_parts = [f"{n} {k}" for k, (_, n) in results.items()]
@@ -1191,8 +1190,6 @@ class Api:
                 elif not (self.dv_client and self.dv_client.signed_in()):
                     sync_msg = 'Saved locally (Dataverse not connected)'
 
-                if kind == 'team' and self.productivity:
-                    self._refresh_productivity_team_derivations()
                 return self._ok(row=data[row_index], synced=synced, msg=sync_msg)
             return self._err('Row index out of range.')
         except Exception as exc:  # noqa: BLE001
@@ -1237,8 +1234,6 @@ class Api:
                         sync_msg = f'Local added, Dataverse sync notice: {dv_exc}'
 
             data.insert(0, new_row)
-            if kind == 'team' and self.productivity:
-                self._refresh_productivity_team_derivations()
             return self._ok(count=len(data), synced=synced, msg=sync_msg)
         except Exception as exc:  # noqa: BLE001
             return self._err(exc)
@@ -1263,8 +1258,6 @@ class Api:
                         sync_msg = f'Local deleted, Dataverse sync notice: {dv_exc}'
 
                 data.pop(row_index)
-                if kind == 'team' and self.productivity:
-                    self._refresh_productivity_team_derivations()
                 return self._ok(count=len(data), synced=synced, msg=sync_msg)
             return self._err('Row index out of range.')
         except Exception as exc:  # noqa: BLE001
@@ -1340,8 +1333,6 @@ class Api:
 
                 # Replace in-memory rows
                 setattr(self, self._REF_ATTR[kind], data)
-                if kind == 'team' and self.productivity:
-                    self._refresh_productivity_team_derivations()
                 fname = os.path.basename(path)
                 self.ref_sources[kind] = f"File: {fname}"
                 self.remembered[kind] = path
@@ -1666,8 +1657,6 @@ class Api:
                 self._pending_ref_sync = None
                 try:
                     setattr(self, self._REF_ATTR[kind], self.dv_client.load_arbitrary_reference_table(target, kind))
-                    if kind == 'team' and self.productivity:
-                        self._refresh_productivity_team_derivations()
                 except Exception:  # noqa: BLE001
                     pass
                 errs = res.get('errors') or []
@@ -1732,14 +1721,23 @@ class Api:
         rows = pt.parse_grid(grid, mode)
         if not rows:
             raise ValueError('No data rows found in the file.')
+        existing_table = self.settings.get('references', {}).get('existing') or ''
+        if self.ref_sources.get('existing', '').startswith('Dataverse: '):
+            existing_table = self.ref_sources['existing'].replace('Dataverse: ', '').strip()
+
+        latest_id = 0
+        if getattr(self, 'existing_records', None):
+            latest_id = max((int(r.get('iD1') or r.get('ID') or 0) for r in self.existing_records if str(r.get('iD1') or r.get('ID') or '').isdigit()), default=0)
+
         if self.dv_client and self.dv_client.signed_in():
             try:
                 start_date, end_date, area_indexes = pt.get_batch_work_week_bounds(rows, mode, self.municipality_codes)
-                latest_id = self.dv_client.get_latest_id(mode)
+                if not latest_id:
+                    latest_id = self.dv_client.get_latest_id(mode, table_logical=existing_table or None)
                 # Fetch batch history into the SEPARATE dedup fields only — do NOT
                 # touch the Existing Records reference display (count/name/source).
                 # Fetches area-matching records for duplicate checking and Work Week records for weekly LO cross-checking.
-                area_recs = self.dv_client.get_records_for_area_indexes(mode, area_indexes)
+                area_recs = self.dv_client.get_records_for_area_indexes(mode, area_indexes, table_logical=existing_table or None)
                 date_recs = self.dv_client.get_records_in_date_range(mode, start_date, end_date)
                 merged = {}
                 for r in (area_recs + date_recs):
@@ -1747,12 +1745,18 @@ class Api:
                     merged[rid] = r
                 self._dedup_records = list(merged.values())
                 self._dedup_area_set = {str(r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex') or '').strip().lower() for r in self._dedup_records if (r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or r.get('areaIndex'))}
+                self._checker_history_scope = (mode, {ai.strip().lower() for ai in area_indexes if ai})
+                if not latest_id:
+                    all_recs = (self._dedup_records or []) + (self.existing_records or [])
+                    latest_id = max((int(r.get('iD1') or r.get('ID') or 0) for r in all_recs if str(r.get('iD1') or r.get('ID') or '').isdigit()), default=0)
             except Exception:
+                if not latest_id:
+                    all_recs = (self._dedup_records or []) + (self.existing_records or [])
+                    latest_id = max((int(r.get('iD1') or r.get('ID') or 0) for r in all_recs if str(r.get('iD1') or r.get('ID') or '').isdigit()), default=0)
+        else:
+            if not latest_id:
                 all_recs = (self._dedup_records or []) + (self.existing_records or [])
                 latest_id = max((int(r.get('iD1') or r.get('ID') or 0) for r in all_recs if str(r.get('iD1') or r.get('ID') or '').isdigit()), default=0)
-        else:
-            all_recs = (self._dedup_records or []) + (self.existing_records or [])
-            latest_id = max((int(r.get('iD1') or r.get('ID') or 0) for r in all_recs if str(r.get('iD1') or r.get('ID') or '').isdigit()), default=0)
         rows = pt.apply_sequential_ids(rows, latest_id)
         self.mode = mode
         self.auto_mode = False
@@ -1823,6 +1827,36 @@ class Api:
                 all_areas.add(ai)
         return all_recs, all_areas
 
+    def _checker_history_ready(self) -> bool:
+        # If an explicit Existing Records table is loaded into memory:
+        if getattr(self, 'existing_records', None):
+            return True
+
+        scope = getattr(self, '_checker_history_scope', None)
+        if scope and isinstance(scope, (tuple, list)) and len(scope) == 2:
+            scope_mode, scope_areas = scope
+            if scope_mode != self.mode:
+                return False
+            if not getattr(self, 'rows', None):
+                return True
+            current_areas = {
+                pt.get_derived_area_index(r, getattr(self, 'municipality_codes', [])).strip().lower()
+                for r in self.rows
+            }
+            current_areas.discard('')
+            return current_areas.issubset(set(scope_areas or set()))
+
+        if getattr(self, '_dedup_area_set', None):
+            current_areas = {
+                pt.get_derived_area_index(r, getattr(self, 'municipality_codes', [])).strip().lower()
+                for r in getattr(self, 'rows', [])
+            }
+            current_areas.discard('')
+            if current_areas and current_areas.issubset(self._dedup_area_set):
+                return True
+
+        return False
+
     # -- calculate / generate ---------------------------------------------
     def calculate(self, use_current_build: bool = False):
         if not self.rows:
@@ -1842,10 +1876,12 @@ class Api:
                         for c in ov:
                             r.pop(c, None)
                 all_recs, all_areas = self._get_combined_existing()
+                history_ready = self._checker_history_ready()
                 self.calculated = pt.calculate_review_rows(self.rows, self.municipality_codes, self.mapping_statuses,
                                                            self.build_rows, all_recs, all_areas,
                                                            ignore_build_work_week=self.use_current_build,
-                                                           mode=self.mode)
+                                                           mode=self.mode,
+                                                           history_ready=history_ready)
                 self.has_calculated = True
                 self.records_published_clean = False  # records must be (re)published before stage 5
                 build_errs = pt.get_build_week_errors(self.calculated, self.build_rows, self.mode,
@@ -1890,7 +1926,8 @@ class Api:
                 all_recs, _ = self._get_combined_existing()
                 productivity = pt.build_productivity_rows(self.calculated, self.teams, self.mapping_statuses,
                                                           all_recs, self.municipality_codes,
-                                                          mode=self.mode)
+                                                          mode=self.mode,
+                                                          history_ready=self._checker_history_ready())
                 self.productivity = pt.enrich_workspace_rows(productivity, self.teams)
                 self.records_published_clean = False  # productivity changed; re-publish records to unlock stage 5
                 self._done(f'Generated {len(self.productivity)} productivity rows.',
@@ -1900,27 +1937,27 @@ class Api:
 
         return self._async(worker)
 
-    def _refresh_productivity_team_derivations(self):
-        """Refresh only Team Composition-derived productivity fields in place."""
-        lookup = pt.build_team_lookup(self.teams)
-        for row in self.productivity:
-            pt.apply_team_lookup_to_productivity_row(row, lookup)
-
     def update_matched(self, index, name):
         try:
             index = int(index)
             if index < 0 or index >= len(self.productivity):
                 return self._err('Row out of range.')
+            lookup = pt.build_team_lookup(self.teams)
+            defaults = lookup.get((name or '').strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
             row = self.productivity[index]
             row['MATCHED NEGOTIATOR NAME'] = name
-            pt.apply_team_lookup_to_productivity_row(row, pt.build_team_lookup(self.teams))
-            return {'ok': True, 'row': self._productivity_row_cells(row),
-                    'memoError': row.get('_MEMO_REF_ERROR', '')}
+            row['CORRECT TEAM'] = defaults['correctTeam']
+            row['TEAM MATCH'] = pt.get_match_status(pt.normalize_team(row.get('TEAM')), defaults['correctTeam'])
+            row['CORRECT GROUP'] = defaults['correctGroup']
+            row['GROUP MATCH'] = pt.get_match_status(pt.normalize_group(row.get('GROUP')), defaults['correctGroup'])
+            return {'ok': True, 'row': self._productivity_row_cells(row)}
         except Exception as exc:  # noqa: BLE001
             return self._err(exc)
 
     def update_review_cell(self, row_index: int, key: str, value: str):
         try:
+            if str(key).upper() == 'CHECKER':
+                return self._err('CHECKER is an auto-derived column and cannot be edited manually.')
             row_index = int(row_index)
             target_list = self.calculated if self.has_calculated and self.calculated else self.rows
             if row_index < 0 or row_index >= len(target_list):
@@ -1947,10 +1984,12 @@ class Api:
             # Recalculate if already calculated
             if self.has_calculated:
                 all_recs, all_areas = self._get_combined_existing()
+                history_ready = self._checker_history_ready()
                 self.calculated = pt.calculate_review_rows(self.rows, self.municipality_codes, self.mapping_statuses,
                                                            self.build_rows, all_recs, all_areas,
                                                            ignore_build_work_week=self.use_current_build,
-                                                           mode=self.mode)
+                                                           mode=self.mode,
+                                                           history_ready=history_ready)
                 updated_row = self.calculated[row_index]
             else:
                 updated_row = self.rows[row_index]
@@ -2073,9 +2112,6 @@ class Api:
                     reason = pt.date_cell_error(k, val)
                     if reason:
                         bad.append(f"{k} = '{val}' ({reason})")
-            memo_error = str(row.get('_MEMO_REF_ERROR', '') or '').strip()
-            if memo_error:
-                bad.append(f'MEMO REF: {memo_error}')
             if bad:
                 hard_errors.append({'row': row_num, 'label': label, 'issues': bad})
                 continue
@@ -2107,10 +2143,6 @@ class Api:
             rows = self._rows_for_stage(workspace_mode)
             if not rows:
                 return self._err('No records in workspace to validate.')
-            if workspace_mode != 'review':
-                memo_target_error = self._productivity_memo_target_error(target)
-                if memo_target_error:
-                    return self._err(memo_target_error)
             override = bool(override)
             # Override needs the key->record-id map (to know what to PATCH); the plain
             # skip path only needs the key set. Cache both so the publish that follows
@@ -2149,20 +2181,7 @@ class Api:
         if workspace_mode == 'review':
             return self.calculated if self.has_calculated else self.rows
         columns = pt.get_output_columns(self.mode)
-        return [{**{c: r.get(c, '') for c in columns},
-                 '_MEMO_REF_ERROR': r.get('_MEMO_REF_ERROR', '')}
-                for r in self.productivity]
-
-    def _productivity_memo_target_error(self, target: str) -> str:
-        """Return a clear error if the target cannot accept Memo Ref."""
-        if not self.dv_client:
-            return 'Please connect to Dataverse first.'
-        memo_attr = self.dv_client.get_writable_attribute(
-            target, 'MEMO REF', 'Memo Ref', 'cr63f_memoref')
-        if not memo_attr:
-            return ('The selected productivity table does not contain a writable '
-                    'Memo Ref column.')
-        return ''
+        return [{c: r.get(c, '') for c in columns} for r in self.productivity]
 
     def _publish_stage(self, workspace_mode, target, reassign_ids=False, override=False):
         """Shared worker for both publish stages. Returns a receipt dict.
@@ -2174,10 +2193,6 @@ class Api:
         rows = self._rows_for_stage(workspace_mode)
         if not rows:
             return {'ok': False, 'error': 'No records to publish.'}
-        if workspace_mode != 'review':
-            memo_target_error = self._productivity_memo_target_error(target)
-            if memo_target_error:
-                return {'ok': False, 'error': memo_target_error}
 
         override = bool(override)
         # Partition FIRST, against the same rows/IDs validation used, so the
@@ -2689,15 +2704,28 @@ class Api:
         # and the saved file still keep them; this only filters the display.
         _hidden = ('CORRECT TEAM', 'CORRECT GROUP')
         headers = [h for h in pt.get_review_headers(self.mode) if h not in _hidden]
+        history_ready = self._checker_history_ready()
+        all_recs = []
+        if hasattr(self, '_get_combined_existing'):
+            all_recs, _ = self._get_combined_existing()
+        else:
+            all_recs = (getattr(self, 'existing_records', []) or []) + (getattr(self, '_dedup_records', []) or [])
         body = []
         for row in rows:
-            body.append([str(row.get(h, '') if row.get(h, '') is not None else '') for h in headers])
-        meta = {h: pt.get_column_type_and_choices(h, self.mode, self.teams, self.municipality_codes, self.mapping_statuses, self.build_rows) for h in headers}
+            row_cells = []
+            for h in headers:
+                if h == 'CHECKER' and not getattr(self, 'has_calculated', False):
+                    val = pt.get_checker(row, rows, all_recs, history_ready=history_ready, mode=self.mode)
+                else:
+                    val = row.get(h, '') if row.get(h, '') is not None else ''
+                row_cells.append(str(val))
+            body.append(row_cells)
+        meta = {h: pt.get_column_type_and_choices(h, self.mode, getattr(self, 'teams', []), getattr(self, 'municipality_codes', []), getattr(self, 'mapping_statuses', []), getattr(self, 'build_rows', [])) for h in headers}
         # Build work-week mismatches (only meaningful once BUILD is derived, i.e. after Calculate)
-        build_errors = pt.get_build_week_errors(rows, self.build_rows, self.mode,
-                                                ignore_work_week=self.use_current_build) if self.has_calculated else []
+        build_errors = pt.get_build_week_errors(rows, getattr(self, 'build_rows', []), self.mode,
+                                                ignore_work_week=getattr(self, 'use_current_build', False)) if getattr(self, 'has_calculated', False) else []
         return {'headers': headers, 'rows': body, 'meta': meta, 'buildErrors': build_errors,
-                'useCurrentBuild': self.use_current_build}
+                'useCurrentBuild': getattr(self, 'use_current_build', False)}
 
 
     def _productivity_table(self):
@@ -2706,13 +2734,9 @@ class Api:
         rows = [self._productivity_row_cells(r) for r in self.productivity]
         editable_index = columns.index('MATCHED NEGOTIATOR NAME') if 'MATCHED NEGOTIATOR NAME' in columns else -1
         match_cols = [i for i, c in enumerate(columns) if c in ('TEAM MATCH', 'GROUP MATCH')]
-        meta = {c: pt.get_column_type_and_choices(c, self.mode, self.teams, self.municipality_codes, self.mapping_statuses, self.build_rows) for c in columns}
-        memo_errors = {str(i): str(row.get('_MEMO_REF_ERROR', '') or '')
-                       for i, row in enumerate(self.productivity)
-                       if str(row.get('_MEMO_REF_ERROR', '') or '')}
+        meta = {c: pt.get_column_type_and_choices(c, self.mode, getattr(self, 'teams', []), getattr(self, 'municipality_codes', []), getattr(self, 'mapping_statuses', []), getattr(self, 'build_rows', [])) for c in columns}
         return {'columns': columns, 'labels': labels, 'rows': rows,
-                'matchedIndex': editable_index, 'matchColumns': match_cols,
-                'meta': meta, 'memoErrors': memo_errors}
+                'matchedIndex': editable_index, 'matchColumns': match_cols, 'meta': meta}
 
     def _productivity_row_cells(self, row):
         columns = pt.get_output_columns(self.mode)
@@ -2720,6 +2744,8 @@ class Api:
 
     def update_productivity_cell(self, row_index: int, key: str, value: str):
         try:
+            if str(key).upper() == 'CHECKER':
+                return self._err('CHECKER is an auto-derived column and cannot be edited manually.')
             row_index = int(row_index)
             if row_index < 0 or row_index >= len(self.productivity):
                 return self._err('Row index out of range.')
@@ -2730,9 +2756,13 @@ class Api:
 
             # If matched negotiator was edited, update correct team, correct group, team match, group match
             if key in ('MATCHED NEGOTIATOR NAME', 'MATCHED SOURCER', 'NEGOTIATOR NAME', 'LSA NAME'):
+                lookup = pt.build_team_lookup(self.teams)
                 matched_name = row.get('MATCHED NEGOTIATOR NAME') or row.get('NEGOTIATOR NAME') or row.get('LSA NAME') or ''
-                row['MATCHED NEGOTIATOR NAME'] = matched_name
-                pt.apply_team_lookup_to_productivity_row(row, pt.build_team_lookup(self.teams))
+                defaults = lookup.get(matched_name.strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
+                row['CORRECT TEAM'] = defaults['correctTeam']
+                row['TEAM MATCH'] = pt.get_match_status(pt.normalize_team(row.get('TEAM')), defaults['correctTeam'])
+                row['CORRECT GROUP'] = defaults['correctGroup']
+                row['GROUP MATCH'] = pt.get_match_status(pt.normalize_group(row.get('GROUP')), defaults['correctGroup'])
 
             elif key == 'TEAM':
                 val_clean = pt.normalize_team(val_clean)
@@ -2758,7 +2788,6 @@ class Api:
                 'state': self.state(),
                 'table': self._productivity_table(),
                 'row': self._productivity_row_cells(row),
-                'memoError': row.get('_MEMO_REF_ERROR', ''),
                 'msg': f'Updated {key}.'
             }
         except Exception as exc:  # noqa: BLE001
