@@ -695,6 +695,14 @@ class DataverseClient:
 
         col_map = {}
         for key in sample_keys:
+            # Record tables store the calculated workspace CHECKER in their
+            # DUPLICATE CHECKER field. Productivity tables have a separate
+            # CHECKER field and must keep their existing mapping.
+            if key.upper() == 'CHECKER' and 'record' in entity_logical.lower():
+                res = self._resolve(entity_logical, 'DUPLICATE CHECKER', 'cr63f_duplicatechecker')
+                if res and res.get('isValidForCreate') is not False:
+                    col_map[key] = res['logical']
+                continue
             candidates = _KEY_ALIASES.get(key.upper(), [key])
             res = self._resolve(entity_logical, *candidates)
             if res and res.get('isValidForCreate') is not False:
