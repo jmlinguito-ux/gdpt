@@ -18,6 +18,7 @@ Config (dataverse_config.json in the app's LocalAppData folder when installed):
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -115,6 +116,39 @@ def _to_float(val: Any) -> float:
         return float(str(val or 0).replace(',', '').strip())
     except (ValueError, TypeError):
         return 0.0
+
+
+INTEGER_ATTRIBUTE_TYPES = {'Integer', 'BigInt'}
+DECIMAL_ATTRIBUTE_TYPES = {'Decimal', 'Double', 'Money'}
+NUMERIC_ATTRIBUTE_TYPES = INTEGER_ATTRIBUTE_TYPES | DECIMAL_ATTRIBUTE_TYPES
+
+
+def parse_numeric_value(value: Any, attr_type: str) -> int | float:
+    """Parse a Dataverse numeric value without silently turning bad text into zero."""
+    text = str(value if value is not None else '').strip()
+    if not text:
+        raise ValueError('A numeric value is required.')
+
+    if ',' in text:
+        grouped_pattern = r'[+-]?\d{1,3}(?:,\d{3})+(?:\.\d*)?(?:[eE][+-]?\d+)?'
+        if not re.fullmatch(grouped_pattern, text):
+            raise ValueError('Use digits only, with valid thousands separators.')
+        text = text.replace(',', '')
+
+    if attr_type in INTEGER_ATTRIBUTE_TYPES:
+        if not re.fullmatch(r'[+-]?\d+', text):
+            raise ValueError('Expected a whole number.')
+        return int(text)
+
+    if attr_type in DECIMAL_ATTRIBUTE_TYPES:
+        if not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', text):
+            raise ValueError('Expected a numeric value.')
+        number = float(text)
+        if not math.isfinite(number):
+            raise ValueError('The numeric value must be finite.')
+        return number
+
+    raise ValueError(f'Unsupported numeric attribute type: {attr_type}.')
 
 
 def _to_iso_date(val: Any) -> str | None:
@@ -461,10 +495,8 @@ class DataverseClient:
                 return _to_int(serial_val)
             return serial_val
 
-        if attr_type in ('Integer', 'BigInt'):
-            return _to_int(s_val)
-        elif attr_type in ('Decimal', 'Double', 'Money'):
-            return _to_float(s_val)
+        if attr_type in NUMERIC_ATTRIBUTE_TYPES:
+            return parse_numeric_value(s_val, attr_type)
         elif attr_type in ('DateTime', 'Date'):
             return _to_iso_date(s_val)
         elif attr_type in ('String', 'Memo'):
@@ -1915,8 +1947,13 @@ class DataverseClient:
                                  top=min(limit, 5000) if limit else 5000,
                                  filter_str=filter_str or None, max_rows=limit)
         rows = []
+        numeric_types = NUMERIC_ATTRIBUTE_TYPES
         for r in rows_raw:
-            row = {c['logical']: _formatted(r, c['logical']) for c in chosen}
+            row = {
+                c['logical']: _s(r.get(c['logical'])) if c.get('type') in numeric_types
+                else _formatted(r, c['logical'])
+                for c in chosen
+            }
             row['_record_id'] = _s(r.get(pk)) if pk else ''
             row['_entity_logical'] = logical_name
             rows.append(row)

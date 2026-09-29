@@ -92,6 +92,64 @@ class EditorGridTests(unittest.TestCase):
         self.assertFalse(api.update_editor_cell('nego-records', 0, 'nope', 'x')['ok'])
         self.assertFalse(api.update_editor_cell('nego-records', 99, 'cr63f_stage', 'x')['ok'])
 
+    def test_points_cannot_be_edited_in_productivity_table_editor(self):
+        api = _make_api()
+        ed = api._editor('sourcing-productivity')
+        ed.update({
+            'table': 'cr63f_batangassourcingproductivity',
+            'columns': ['cr63f_points'],
+            'labels': ['POINTS'],
+            'rows': [{'cr63f_points': '0.3333', '_record_id': 'guid-1'}],
+            'dirty': {}, 'loaded': True,
+        })
+
+        res = api.update_editor_cell('sourcing-productivity', 0, 'cr63f_points', '0.5')
+
+        self.assertFalse(res['ok'])
+        self.assertIn('generated', res['error'].lower())
+        self.assertEqual(ed['rows'][0]['cr63f_points'], '0.3333')
+        self.assertEqual(ed['dirty'], {})
+
+    def test_numeric_editor_rejects_text_before_staging(self):
+        api = _make_api()
+        ed = _seed(api)
+        ed['columns'].append('cr63f_amount')
+        ed['labels'].append('AMOUNT')
+        ed['types']['cr63f_amount'] = 'Double'
+        for row in ed['rows']:
+            row['cr63f_amount'] = '12.5'
+
+        res = api.update_editor_cell('nego-records', 0, 'cr63f_amount', 'abc')
+
+        self.assertFalse(res['ok'])
+        self.assertIn('numeric', res['error'].lower())
+        self.assertEqual(ed['rows'][0]['cr63f_amount'], '12.5')
+        self.assertEqual(ed['dirty'], {})
+
+    def test_numeric_editor_accepts_valid_decimal(self):
+        api = _make_api()
+        ed = _seed(api)
+        ed['columns'].append('cr63f_amount')
+        ed['labels'].append('AMOUNT')
+        ed['types']['cr63f_amount'] = 'Double'
+        for row in ed['rows']:
+            row['cr63f_amount'] = '12.5'
+
+        res = api.update_editor_cell('nego-records', 0, 'cr63f_amount', '0.75')
+
+        self.assertTrue(res['ok'])
+        self.assertEqual(ed['rows'][0]['cr63f_amount'], '0.75')
+
+    def test_points_cannot_be_edited_in_generated_productivity_grid(self):
+        api = _make_api()
+        api.productivity = [{'POINTS': 0.3333}]
+
+        res = api.update_productivity_cell(0, 'POINTS', '0.5')
+
+        self.assertFalse(res['ok'])
+        self.assertIn('generated', res['error'].lower())
+        self.assertEqual(api.productivity[0]['POINTS'], 0.3333)
+
     def test_editor_table_exposes_dirty_cells_by_position(self):
         api = _make_api()
         _seed(api)

@@ -2377,7 +2377,7 @@ function isFutureDateVal(val) {
 
 function isCalculatedColumn(headerName) {
   const norm = String(headerName || '').trim().toUpperCase();
-  return ['LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'CORRECT TEAM', 'CORRECT GROUP', 'MATCHED TEAM', 'MATCHED GROUP'].includes(norm);
+  return ['LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'CORRECT TEAM', 'CORRECT GROUP', 'MATCHED TEAM', 'MATCHED GROUP', 'POINTS'].includes(norm);
 }
 
 function isMatchedNegotiatorColumn(headerName) {
