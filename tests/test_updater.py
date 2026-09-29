@@ -66,6 +66,18 @@ class UpdateServiceTests(unittest.TestCase):
         state = _wait_for(service, "up_to_date")
         self.assertIn("latest", state["message"])
 
+    def test_apply_uses_sdk_apply_and_restart_lifecycle(self):
+        service, _ = self.make_service(_Manager())
+        service._update_info = object()
+        service._state["status"] = "ready"
+        calls = []
+        service._manager.apply_updates_and_restart = lambda info: calls.append(info)
+
+        state = service.apply_and_restart()
+
+        self.assertEqual(calls, [service._update_info])
+        self.assertEqual(state["status"], "installing")
+
     def test_release_config_uses_static_feed_without_github_api(self):
         config = load_update_config()
         self.assertEqual(config["source"], "http")

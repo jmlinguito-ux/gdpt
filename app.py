@@ -264,20 +264,6 @@ class Api:
         except Exception:
             pass
         status = self.updater.apply_and_restart()
-        if status.get('status') == 'installing':
-            def _shutdown():
-                time.sleep(0.3)
-                try:
-                    win = self._window()
-                    if win:
-                        win.destroy()
-                except Exception:
-                    pass
-                time.sleep(0.2)
-                _terminate_child_processes()
-                time.sleep(0.1)
-                os._exit(0)
-            threading.Thread(target=_shutdown, daemon=True).start()
         return {'ok': status.get('status') != 'error', 'update': status,
                 'error': status.get('message') if status.get('status') == 'error' else None}
 

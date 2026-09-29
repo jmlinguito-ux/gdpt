@@ -238,8 +238,11 @@ class UpdateService:
             return self._set(status="error", message="Download the update before restarting.")
         self._set(status="installing", message="Closing the app and installing the update…")
         try:
-            # Update.exe waits for this process to release WebView2 and then relaunches it.
-            self._manager.wait_exit_then_apply_updates(self._update_info, True, True, None)
+            # Let the Python SDK own the full apply-and-restart lifecycle. The
+            # lower-level wait_exit_then_apply_updates call only launches the
+            # updater; the host application must then shut down correctly or
+            # the downloaded package can remain staged without being applied.
+            self._manager.apply_updates_and_restart(self._update_info)
             return self.state()
         except Exception as exc:
             return self._set(status="error", message=f"Could not start the installer: {exc}")
