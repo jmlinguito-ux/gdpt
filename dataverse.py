@@ -1148,6 +1148,8 @@ class DataverseClient:
             'team': ('Team', 'Team Name'),
             'group': ('Group', 'Group Name'),
             'dept': ('Department', 'Dept', 'Department Name'),
+            'memoNo': ('Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo',
+                       'Memo Code', 'MemoCode', 'cr63f_memono'),
         },
         'municipality': {
             'municipality': ('Municipality', 'City', 'Town'),
@@ -1192,10 +1194,13 @@ class DataverseClient:
         team = self._resolve(ent, 'Team')
         group = self._resolve(ent, 'Group')
         dept = self._resolve(ent, 'Department', 'Dept')
-        select = [_select_name(c) for c in (name, team, group, dept) if c]
+        memo_no = self._resolve(ent, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo',
+                                'Memo Code', 'MemoCode', 'cr63f_memono')
+        select = [_select_name(c) for c in (name, team, group, dept, memo_no) if c]
         if pk and pk not in select:
             select.append(pk)
-        rows = self._get_all(info['entitySetName'], select, formatted=_needs_formatting(name, team, group, dept))
+        rows = self._get_all(info['entitySetName'], select,
+                             formatted=_needs_formatting(name, team, group, dept, memo_no))
         out = []
         for r in rows:
             out.append({
@@ -1203,6 +1208,7 @@ class DataverseClient:
                 'team': _formatted(r, team['logical']) if team else '',
                 'group': _formatted(r, group['logical']) if group else '',
                 'dept': _formatted(r, dept['logical']) if dept else '',
+                'memoNo': _formatted(r, memo_no['logical']) if memo_no else '',
                 '_record_id': _s(r.get(pk)),
                 '_entity_logical': ent,
             })
@@ -2015,14 +2021,18 @@ class DataverseClient:
             team = self._resolve(logical_name, 'Team', 'Team Name')
             group = self._resolve(logical_name, 'Group', 'Group Name')
             dept = self._resolve(logical_name, 'Department', 'Dept')
-            select = [_select_name(c) for c in (name, team, group, dept) if c]
+            memo_no = self._resolve(logical_name, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo',
+                                    'Memo Code', 'MemoCode', 'cr63f_memono')
+            select = [_select_name(c) for c in (name, team, group, dept, memo_no) if c]
             if pk and pk not in select:
                 select.append(pk)
-            rows = self._get_all(entity_set, select, formatted=_needs_formatting(name, team, group, dept))
+            rows = self._get_all(entity_set, select,
+                                 formatted=_needs_formatting(name, team, group, dept, memo_no))
             out = [{'employeeName': _formatted(r, name['logical']) if name else '',
                     'team': _formatted(r, team['logical']) if team else '',
                     'group': _formatted(r, group['logical']) if group else '',
                     'dept': _formatted(r, dept['logical']) if dept else '',
+                    'memoNo': _formatted(r, memo_no['logical']) if memo_no else '',
                     '_record_id': _s(r.get(pk)),
                     '_entity_logical': logical_name} for r in rows]
             return [r for r in out if r['employeeName']]

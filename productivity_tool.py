@@ -1476,7 +1476,9 @@ def load_reference_workbook(path: str):
             for d in dicts:
                 teams.append({'employeeName': _pick(d, 'Employee Name', 'Name', 'Negotiator', 'LSA Name', 'Negotiator Name'),
                               'team': normalize_team(_pick(d, 'Team')), 'group': normalize_group(_pick(d, 'Group')),
-                              'dept': _pick(d, 'Department', 'Dept', 'DEPARTMENT', 'DEPT')})
+                              'dept': _pick(d, 'Department', 'Dept', 'DEPARTMENT', 'DEPT'),
+                              'memoNo': _pick(d, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo',
+                                              'Memo Code', 'MemoCode', 'cr63f_memono')})
         elif 'MUNICIPAL' in title or 'MUNI' in title:
             for d in dicts:
                 municipality_codes.append({'municipality': _pick(d, 'Municipality'),
@@ -1502,7 +1504,7 @@ def load_reference_workbook(path: str):
 
 # Per-source reference table definitions ------------------------------------
 REFERENCE_TEMPLATE_HEADERS = {
-    'team': ['Employee Name', 'Team', 'Group', 'Department'],
+    'team': ['Employee Name', 'Team', 'Group', 'Department', 'Memo No.'],
     'municipality': ['Municipality', 'MuniCode', 'Province'],
     'mapping': ['Description', 'Mapping Status', 'Data Usability'],
     'build': ['Area Index', 'Build', 'Work Week'],
@@ -1510,7 +1512,8 @@ REFERENCE_TEMPLATE_HEADERS = {
 }
 
 REFERENCE_VIEW_COLUMNS = {
-    'team': [('employeeName', 'Employee Name'), ('team', 'Team'), ('group', 'Group'), ('dept', 'Department')],
+    'team': [('employeeName', 'Employee Name'), ('team', 'Team'), ('group', 'Group'), ('dept', 'Department'),
+             ('memoNo', 'Memo No.')],
     'municipality': [('municipality', 'Municipality'), ('muniCode', 'MuniCode'), ('province', 'Province')],
     'mapping': [('description', 'Description'), ('mappingLabel', 'Mapping Status'), ('dataUsability', 'Data Usability')],
     'build': [('areaIndex', 'Area Index'), ('build', 'Build'), ('workWeek', 'Work Week')],
@@ -1559,6 +1562,8 @@ def load_single_reference(path: str, kind: str) -> list[dict]:
                 'team': normalize_team(_pick(d, 'Team', 'TEAM', 'Team Name', 'TEAM NAME')),
                 'group': normalize_group(_pick(d, 'Group', 'GROUP', 'Group Name', 'GROUP NAME')),
                 'dept': _pick(d, 'Department', 'DEPARTMENT', 'Dept', 'DEPT', 'Department Name'),
+                'memoNo': _pick(d, 'Memo No.', 'Memo No', 'Memo Number', 'Memo #', 'MemoNo',
+                                'Memo Code', 'MemoCode', 'cr63f_memono'),
             })
         return [r for r in out if r['employeeName']]
     if kind == 'municipality':
