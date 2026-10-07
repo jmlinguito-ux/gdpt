@@ -3423,7 +3423,18 @@ function renderProductivityBody() {
         td.title = valRes.error;
       }
 
-      if (isMatchColumn(colLabel) || isMatchColumn(colKey) || matchSet.has(ci)) {
+      if (String(colLabel).trim().toUpperCase() === 'BUILD' || String(colKey).trim().toUpperCase() === 'BUILD') {
+        // BUILD is calculated from the reference table before productivity
+        // expansion. Render it before the choice-editor branch so it stays read-only.
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = `cell-input cell-readonly ${!valRes.valid ? 'cell-invalid' : ''}`;
+        if (!valRes.valid) input.title = valRes.error;
+        input.readOnly = true;
+        input.value = valStr.toUpperCase();
+        input.spellcheck = false;
+        td.appendChild(input);
+      } else if (isMatchColumn(colLabel) || isMatchColumn(colKey) || matchSet.has(ci)) {
         td.innerHTML = matchBadge(valStr.toUpperCase());
       } else if (colMeta.type === 'choice' || isMatchedNegotiatorColumn(colLabel) || isMatchedNegotiatorColumn(colKey)) {
         const isMatchedNeg = isMatchedNegotiatorColumn(colLabel) || isMatchedNegotiatorColumn(colKey);

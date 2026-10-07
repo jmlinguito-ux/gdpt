@@ -1237,6 +1237,7 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
                 'GROUP': normalize_group(row.get('GROUP', '')),
                 'NEGOTIATOR NAME': name, 'NEGO CODE': row.get('NEGO CODE', '') or '',
                 'NEGOTIATOR MATCH': negotiator_match, 'DATA USABILITY': data_usability,
+                'BUILD': row.get('BUILD', '') or '',
                 'UNIQUE ID': f"{derived_area_index}{record_date}{checker}", 'CHECKER': checker, 'POINTS': 0,
                 'NEGO DISTINCTION': '', 'LO': get_lo_occurrence_name(row), 'LO OCCURRENCE KEY': get_lo_occurrence_name(row),
                 'LO OCCURRENCE BY DAY': 0, 'LO OCCURRENCE BY WW': 0, 'LO POINTS BY DAY': 0, 'LO POINTS BY WW': 0,
@@ -1377,7 +1378,7 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> l
 OUTPUT_COLUMNS = [
     'ITEM #', 'AREA INDEX', 'NEGO DATE', 'WORK WEEK', 'PROVINCE', 'MUNICIPALITY', 'BARANGAY', 'TYPE OF REPORT', 'ACTION',
     'NEGOTIATOR NAME', 'NEGO CODE', 'MATCHED NEGOTIATOR NAME', 'TEAM', 'CORRECT TEAM', 'TEAM MATCH', 'GROUP',
-    'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'LO', 'POINTS',
+    'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'BUILD', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'LO', 'POINTS',
     'LO OCCURRENCE BY DAY', 'LO OCCURRENCE BY WW', 'LO POINTS BY DAY', 'LO POINTS BY WW', 'LO COUNT BY DAY', 'LO COUNT BY WW',
 ]
 

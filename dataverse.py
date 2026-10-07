@@ -723,6 +723,7 @@ class DataverseClient:
             'SOURCER CODE': ['SOURCER CODE', 'NEGO CODE', 'SOURCING CODE', 'CODE', 'cr63f_sourcercode', 'cr63f_negocode', 'cr63f_code'],
             'NEGOTIATOR MATCH': ['NEGOTIATOR MATCH', 'SOURCER MATCH', 'SOURCING MATCH', 'cr63f_sourcermatch', 'cr63f_negotiatormatch'],
             'SOURCER MATCH': ['SOURCER MATCH', 'NEGOTIATOR MATCH', 'SOURCING MATCH', 'cr63f_sourcermatch', 'cr63f_negotiatormatch'],
+            'BUILD': ['BUILD', 'cr63f_build'],
         }
 
         col_map = {}
@@ -747,6 +748,17 @@ class DataverseClient:
                     if _norm(attr_name) == n_key or _norm(attr_meta.get('label', '')) == n_key:
                         col_map[key] = attr_name
                         break
+
+        # BUILD must be persisted on productivity rows. Fail before publishing
+        # rather than silently omitting a generated value from a target table.
+        if 'productivity' in entity_logical.lower() and any(str(k).upper() == 'BUILD' for k in sample_keys):
+            build_logical = col_map.get('BUILD')
+            if not build_logical:
+                raise ValueError(f"Productivity table '{entity_logical}' is missing a writable BUILD text column.")
+            build_meta = next((m for m in amap.values()
+                               if str(m.get('logical', '')).lower() == str(build_logical).lower()), {})
+            if build_meta.get('type') != 'String':
+                raise ValueError(f"Productivity table '{entity_logical}' BUILD column must be single-line text.")
 
         # Find Date columns (DateTime / Date fields)
         date_attrs = []

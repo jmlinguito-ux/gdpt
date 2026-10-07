@@ -150,6 +150,18 @@ class EditorGridTests(unittest.TestCase):
         self.assertIn('generated', res['error'].lower())
         self.assertEqual(api.productivity[0]['POINTS'], 0.3333)
 
+    def test_build_cannot_be_edited_in_productivity_record_editor(self):
+        api = _make_api()
+        ed = api._editor('nego-productivity')
+        ed.update({'columns': ['cr63f_BUILD'], 'labels': ['BUILD'], 'rows': [{'cr63f_BUILD': 'BUILD-2'}],
+                   'types': {}, 'dirty': {}})
+
+        res = api.update_editor_cell('nego-productivity', 0, 'cr63f_BUILD', 'BUILD-1')
+
+        self.assertFalse(res['ok'])
+        self.assertIn('derived', res['error'].lower())
+        self.assertEqual(ed['rows'][0]['cr63f_BUILD'], 'BUILD-2')
+
     def test_editor_table_exposes_dirty_cells_by_position(self):
         api = _make_api()
         _seed(api)

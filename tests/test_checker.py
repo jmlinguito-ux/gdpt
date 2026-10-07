@@ -48,6 +48,27 @@ class CheckerTests(unittest.TestCase):
         pending = pt.build_productivity_rows(calculated, [], [], [], [], history_ready=False)
         self.assertTrue(all(r['CHECKER'] == 'HISTORY REQUIRED' for r in pending))
 
+    def test_build_lookup_flows_into_read_only_productivity_column(self):
+        source = [row(1, names='Alice / Bob')]
+        build_rows = [{'areaIndex': 'A-1', 'build': 'BUILD-2', 'workWeek': 53}]
+        calculated = pt.calculate_review_rows(source, [], [], build_rows, [])
+        productivity = pt.build_productivity_rows(calculated, [], [], [], [])
+
+        self.assertEqual(calculated[0]['BUILD'], 'BUILD-2')
+        self.assertEqual([r['BUILD'] for r in productivity], ['BUILD-2', 'BUILD-2'])
+        self.assertIn('BUILD', pt.get_output_columns('negotiation'))
+        self.assertIn('BUILD', pt.get_output_columns('land-sourcing'))
+        self.assertEqual(pt.get_column_type_and_choices('BUILD', 'negotiation', [], [], [], build_rows)['type'], 'choice')
+
+        api = Api.__new__(Api)
+        api.productivity = productivity
+        for mode in ('negotiation', 'land-sourcing'):
+            api.mode = mode
+            self.assertEqual(api._productivity_table()['meta']['BUILD']['type'], 'text')
+            self.assertEqual([r['BUILD'] for r in api._rows_for_stage('prod')], ['BUILD-2', 'BUILD-2'])
+        self.assertFalse(api.update_productivity_cell(0, 'BUILD', 'BUILD-1')['ok'])
+        self.assertEqual(api.productivity[0]['BUILD'], 'BUILD-2')
+
     def test_both_modes_expose_checker_as_text(self):
         for mode in ['negotiation', 'land-sourcing']:
             self.assertEqual(pt.get_review_headers(mode).count('CHECKER'), 1)
