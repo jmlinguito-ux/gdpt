@@ -2151,6 +2151,8 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
                 team_choices.append(tv)
         if 'TEAM 0' not in team_choices:
             team_choices.append('TEAM 0')
+        if 'NO TEAM' not in team_choices:
+            team_choices.append('NO TEAM')
         return {'type': 'choice', 'choices': sorted(team_choices)}
 
     if col_upper in ('GROUP', 'GROUP NAME'):
@@ -2161,6 +2163,8 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
                 group_choices.append(gv)
         if 'GROUP 0' not in group_choices:
             group_choices.append('GROUP 0')
+        if 'NO GROUP' not in group_choices:
+            group_choices.append('NO GROUP')
         return {'type': 'choice', 'choices': sorted(group_choices)}
 
     if col_upper in ('CHECKER', 'OFFER LETTER ACTION'):

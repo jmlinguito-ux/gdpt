@@ -863,6 +863,7 @@ class Api:
                 data = self.dv_client.load_table_records(
                     logical, list(columns or []), date_column or '',
                     date_from or '', date_to or '', limit)
+                self._add_editor_team_group_choices(data, logical)
                 ed.update({'table': logical, 'columns': data['columns'], 'labels': data['labels'],
                            'types': data.get('types', {}), 'choices': data.get('choices', {}),
                            'rows': data['rows'], 'dirty': {}, 'loaded': True})
@@ -882,6 +883,22 @@ class Api:
                 self._done(str(exc), error=True, refresh=False)
 
         return self._async(worker)
+
+    def _add_editor_team_group_choices(self, data: dict, logical: str):
+        """Offer roster and unassigned choices for text TEAM/GROUP fields."""
+        mode = ('land-sourcing' if 'sourcing' in logical else
+                'negotiation' if 'nego' in logical else self.mode)
+        choices = data.setdefault('choices', {})
+        for column, label in zip(data['columns'], data['labels']):
+            header = ' '.join(str(label or '').upper().split())
+            if header not in ('TEAM', 'TEAM NAME', 'GROUP', 'GROUP NAME'):
+                continue
+            if data.get('types', {}).get(column) != 'String':
+                continue
+            options = pt.get_column_type_and_choices(
+                header, mode, getattr(self, 'teams', []), [], [], [])['choices']
+            existing = [str(row.get(column) or '').strip() for row in data['rows']]
+            choices[column] = sorted(set(options + choices.get(column, []) + existing) - {''})
 
     def _editor_table(self, scope: str) -> dict:
         ed = self._editor(scope)
