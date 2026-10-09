@@ -2080,7 +2080,8 @@ class Api:
         sources = getattr(self, 'calculated', [])
         history = self._get_combined_existing()[0] if sources else []
         return refresh(self.productivity, sources, history, self.teams, self.mode,
-                       self._checker_history_ready() if sources else True)
+                       self._checker_history_ready() if sources else True,
+                       getattr(self, '_historical_name_reference', None))
 
     def update_review_cell(self, row_index: int, key: str, value: str):
         try:

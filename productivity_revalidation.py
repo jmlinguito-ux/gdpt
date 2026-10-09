@@ -40,6 +40,7 @@ def calculate(productivity, records, team_names=(), mode='negotiation'):
             resolved = historical or pt.get_fuzzy_negotiator_match(n, list(team_names)) or n
             names.update((clean(n), clean(resolved)))
         r['names'] = names
+        names.update(clean(n) for n in r.get('resolved_names', ()) if n)
         if r['area'] and r['day']:
             visits[(r['area'], r['day'])].append(r)
             history[r['area']].append(r)

@@ -48,6 +48,18 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(rows[0]['CHECKER'], 'FIRST CONTACT')
         self.assertEqual(rows[0]['POINTS'], 0)
 
+    def test_evidence_resolved_historical_alias_keeps_source_link(self):
+        import historical_names as hn
+        history = [{'ID': i, 'LSA NAME': 'JOEL CASTRO', 'REPORT DATE': f'08/{i+1:02d}/2026',
+                    'AREA-INDEX': f'A-{i}'} for i in range(5)]
+        r = {'ID': 9, 'AREA-INDEX': 'A', 'REPORT DATE': '08/31/2026', 'LSA NAME': 'JOOEL CASTRO',
+             'CLASSIFICATION': 'SOURCED', 'DATA USABILITY': 'VALID', 'REGISTERED OWNER': 'Owner'}
+        ref = hn.build_reference(history, [])
+        rows = pt.enrich_workspace_rows(pt.build_productivity_rows([r], [], [], [], [], mode='land-sourcing'), [], ref)
+        self.assertFalse(refresh(rows, [r], mode='land-sourcing', historical_name_reference=ref))
+        self.assertEqual(rows[0]['MATCHED NEGOTIATOR NAME'], 'JOEL CASTRO')
+        self.assertEqual(rows[0]['POINTS'], 1)
+
     def test_unresolved_metrics_are_visible_and_publish_is_blocked(self):
         rows, calculated, teams = self.build([source(1, 'ALICE')])
         rows[0]['LO'] = ''

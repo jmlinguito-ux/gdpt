@@ -5,7 +5,7 @@ from productivity_revalidation import calculate as revalidate
 from productivity_metric_recalculation import calculate_productivity_only
 
 
-def refresh(rows, sources=(), history=(), teams=(), mode='negotiation', history_ready=True):
+def refresh(rows, sources=(), history=(), teams=(), mode='negotiation', history_ready=True, historical_name_reference=None):
     """Mutate staged workspace rows only; return review issues, never write live data."""
     source_rows = []
     for prefix, records in (('source', sources), ('history', history)):
@@ -17,6 +17,12 @@ def refresh(rows, sources=(), history=(), teams=(), mode='negotiation', history_
                 'usability': row.get('DATA USABILITY') or row.get('dataUsability'),
                 'number': row.get('ID') or row.get('iD1') or index + 1,
                 'link': row.get('NEGO ID') or row.get('SOURCING ID')})
+            if historical_name_reference is not None and mode == 'land-sourcing':
+                import historical_names as hn
+                source = source_rows[-1]
+                source['resolved_names'] = [hn.resolve(n, historical_name_reference).get('name')
+                    for n in pt.split_negotiators(source['name'] or '')
+                    if pt.historical_sourcer_name(n, source['date'], mode)]
     canonical = []
     for index, row in enumerate(rows):
         canonical.append({'id': str(index), 'area': row.get('AREA INDEX'), 'date': row.get('NEGO DATE'),
