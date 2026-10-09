@@ -62,6 +62,16 @@ action for the stage you are on.
    recompute instantly.
 5. **Filter & Export** — per-column filters, then *Export CSV* or *Export Excel*.
 
+Version 1.1.15 revalidates generated Productivity CHECKER and usability against
+the source visit, with employee-specific duplicate identity (area, date, matched
+employee, classification). The lowest source ID remains eligible and later
+repeats are invalid. POINTS and LO metrics use only visits represented in the
+current Productivity workspace. Records remain the source for validity and
+visit chronology, without contributing extra visits to LO credit totals.
+Unresolved calculations are highlighted and block publishing affected rows.
+Negotiation OFFER LETTER ACTION uses offer dates and INDEX NO visit history;
+OFFER SERVED takes priority over INITIAL VISIT on a matching offer date.
+
 The Publish-to-Dataverse step is intentionally replaced by file export.
 
 ## Connect to Dataverse (live)

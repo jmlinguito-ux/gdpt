@@ -12,15 +12,20 @@ const REF_TABLES = [
   { kind: 'team', name: 'Team Composition', icon: 'users', initial: 'T' },
   { kind: 'mapping', name: 'Mapping Status', icon: 'flag', initial: 'S' },
   { kind: 'build', name: 'Build Table', icon: 'layers', initial: 'B' },
+  { kind: 'offer', name: 'Offer Letter', icon: 'file', initial: 'O' },
   { kind: 'existing', name: 'Existing Records', icon: 'archive', initial: 'E' },
 ];
 const REF_DEFAULT_LOGICAL = {
   municipality: 'cr63f_municipalitycode', team: 'cr63f_teamcomposition',
   mapping: 'cr63f_mappingstatus', build: 'cr63f_batangasbuild', existing: 'cr63f_batangasnegorecord',
+  offer: 'cr63f_offerletter',
 };
 const REF_SYNC_KINDS = ['build', 'team', 'municipality', 'mapping'];  // reference tables that use Sync-to-Dataverse (not plain Upload)
 const REF_ICON = Object.fromEntries(REF_TABLES.map(t => [t.kind, t.icon]));
 const REF_NAME = Object.fromEntries(REF_TABLES.map(t => [t.kind, t.name]));
+function availableReferenceTables(mode = lastState.mode) {
+  return REF_TABLES.filter(t => t.kind !== 'offer' || mode !== 'land-sourcing');
+}
 
 // --- API bridge -------------------------------------------------------------
 function api() { return (window.pywebview && window.pywebview.api) ? window.pywebview.api : null; }
@@ -459,6 +464,7 @@ window.getCurrentPublishMode = () => (typeof currentPublishMode !== 'undefined' 
 
 
 async function showReference(kind) {
+  if (kind === 'offer' && lastState.mode === 'land-sourcing') return;
   currentRefKind = kind;
   // Filter state is keyed by column INDEX, which means different things per table,
   // so reset it when switching tables — otherwise a filter opened/typed on column N
@@ -655,8 +661,16 @@ function buildRefRow(rowCells, origIdx, tableKey) {
     var savedW = getSavedColWidth(tableKey, label, null);
     var td = document.createElement('td');
     if (savedW) { td.style.width = savedW + 'px'; td.style.minWidth = savedW + 'px'; td.style.maxWidth = savedW + 'px'; }
-    var input = document.createElement('input');
-    input.className = 'cell-input';
+    var input = document.createElement(currentRefKind === 'offer' && key === 'offerType' ? 'select' : 'input');
+    if (currentRefKind === 'offer' && key === 'offerType') {
+      ['', 'OFFER LETTER', 'COUNTER OFFER'].forEach(v => input.appendChild(new Option(v || 'Select offer type', v)));
+    }
+    if (currentRefKind === 'offer' && key === 'landArea') { input.type = 'number'; input.min = '0'; input.step = '0.0001'; }
+    if (currentRefKind === 'offer' && key === 'offerDate') {
+      input.type = 'text'; input.placeholder = 'MM/DD/YYYY'; input.spellcheck = false;
+    }
+    if (currentRefKind === 'offer' && key === 'offerLetterLink') input.type = 'url';
+    input.className = 'cell-input' + (currentRefKind === 'offer' && key === 'offerDate' ? ' cell-date' : '');
     input.value = String(c || '');
     input.dataset.rowIdx = origIdx;
     input.dataset.colKey = key;
@@ -664,6 +678,7 @@ function buildRefRow(rowCells, origIdx, tableKey) {
     input.style.width = '100%';
     (function(inp, rIdx, k, ci) {
       var initialVal = inp.value;
+      var refState = currentRefState;
       inp.addEventListener('focus', function() { initialVal = inp.value; });
       inp.addEventListener('change', function() {
         var newVal = inp.value.trim();
@@ -676,8 +691,21 @@ function buildRefRow(rowCells, origIdx, tableKey) {
           var a = api();
           if (a) {
             a.update_reference_cell(currentRefKind, rIdx, k, newVal).then(function(res) {
-              if (res && res.ok !== false) toast(res.msg || 'Saved: ' + k + ' updated.', false);
-              else toast((res && res.error) || 'Failed to save cell.', true);
+              if (res && res.ok !== false) {
+                if (currentRefKind === 'offer' && refState === currentRefState && res.row &&
+                    Object.prototype.hasOwnProperty.call(res.row, k) && inp.value.trim() === newVal) {
+                  var savedValue = String(res.row[k] == null ? '' : res.row[k]);
+                  inp.value = savedValue;
+                  currentRefState.rows[rIdx][ci] = savedValue;
+                  initialVal = savedValue;
+                }
+                if (currentRefKind === 'offer' && res.state) {
+                  lastState = res.state; window.lastState = res.state;
+                  if (window.scheduleShellSync) window.scheduleShellSync();
+                }
+                toast(res.msg || 'Saved: ' + k + ' updated.', false);
+              }
+              else { inp.value = initialVal; currentRefState.rows[rIdx][ci] = initialVal; toast((res && res.error) || 'Failed to save cell.', true); }
             }).catch(function(e) { toast(String(e), true); });
           }
         }
@@ -1324,7 +1352,7 @@ function validateCellValue(val, meta, header) {
 
 function countReviewTableValidationErrors(tableData) {
   if (!tableData || !tableData.rows || !tableData.headers) return 0;
-  let count = 0;
+  let count = Object.keys(tableData.offerErrors || {}).length;
   tableData.rows.forEach(row => {
     tableData.headers.forEach((h, cIdx) => {
       const meta = (tableData.meta && tableData.meta[h]) || { type: 'text' };
@@ -1438,10 +1466,10 @@ function updateProdValidationState() {
 
 // --- Dataverse Reference Table Selection & State ---------------------------
 let activeSolutionTables = [];
-let selectedTableMappings = { team: '', municipality: '', mapping: '', build: '', existing: '' };
+let selectedTableMappings = { team: '', municipality: '', mapping: '', build: '', existing: '', offer: '' };
 let unfetchedRefKinds = new Set();
 
-let selectedReferenceKinds = { team: true, municipality: true, mapping: true, build: true, existing: true };
+let selectedReferenceKinds = { team: true, municipality: true, mapping: true, build: true, existing: true, offer: true };
 let dvBootstrapped = false;
 
 function updateUploadActionState(s) {
@@ -1453,8 +1481,8 @@ function updateUploadActionState(s) {
   const actionSub = $('inputActionSub');
 
   const counts = s.refCounts || {};
-  const totalRefRows = (counts.teams || 0) + (counts.municipality || 0) + (counts.mapping || 0) + (counts.build || 0) + (counts.existing || 0);
-  const hasUnfetched = unfetchedRefKinds.size > 0;
+  const totalRefRows = (counts.teams || 0) + (counts.municipality || 0) + (counts.mapping || 0) + (counts.build || 0) + (counts.existing || 0) + (s.mode === 'land-sourcing' ? 0 : (counts.offer || 0));
+  const hasUnfetched = availableReferenceTables(s.mode).some(t => unfetchedRefKinds.has(t.kind));
   const isLoading = (!!s.refTablesLoading || !!s.isBusy) && totalRefRows === 0;
   const refsLoaded = totalRefRows > 0 && !hasUnfetched;
 
@@ -1500,6 +1528,11 @@ window.updateUploadActionState = updateUploadActionState;
 
 function getTablesForKind(kind, mode) {
   if (!activeSolutionTables || !activeSolutionTables.length) return [];
+  if (kind === 'offer') {
+    if (mode === 'land-sourcing') return [];
+    return activeSolutionTables.filter(t => (t.logicalName || '').toLowerCase().includes('offerletter') ||
+      (t.displayName || '').toUpperCase() === 'OFFER LETTER');
+  }
   if (kind === 'build') {
     return activeSolutionTables.filter(t => {
       const dn = (t.displayName || '').toUpperCase();
@@ -1573,6 +1606,12 @@ function applyState(s) {
   if (!s) return;
   if (s.state) s = s.state;
   lastState = s;
+  document.querySelectorAll('[data-ref="offer"], option[value="offer"]').forEach(el => {
+    el.classList.toggle('hidden', s.mode === 'land-sourcing');
+    el.hidden = s.mode === 'land-sourcing';
+    if (el.tagName === 'OPTION') el.disabled = s.mode === 'land-sourcing';
+  });
+  if (s.mode === 'land-sourcing' && currentRefKind === 'offer') { currentRefKind = null; showView('load'); }
   window.lastState = s;
   window.applyState = applyState;
   negotiatorOptions = s.negotiatorOptions || [];
@@ -1860,10 +1899,10 @@ function renderRefGrid(s) {
   if (!grid) return;
   const counts = s ? (s.refCounts || {}) : {};
   const sources = s ? (s.refSources || {}) : {};
-  const countKey = { municipality: 'municipality', team: 'teams', mapping: 'mapping', build: 'build', existing: 'existing' };
+  const countKey = { municipality: 'municipality', team: 'teams', mapping: 'mapping', build: 'build', existing: 'existing', offer: 'offer' };
   grid.innerHTML = '';
 
-  REF_TABLES.forEach(({ kind, name, icon, initial }) => {
+  availableReferenceTables(s && s.mode).forEach(({ kind, name, icon, initial }) => {
     const isUnfetched = unfetchedRefKinds.has(kind);
     const n = isUnfetched ? 0 : (counts[countKey[kind]] || 0);
     const src = isUnfetched ? '' : (sources[kind] || '');
@@ -1871,7 +1910,7 @@ function renderRefGrid(s) {
 
     // The logical name is only shown if the table has been fetched/loaded (n > 0 and src exists)
     let logicalName = '';
-    if (n > 0 && src) {
+    if (src) {
       if (src.toLowerCase().startsWith('dataverse:')) {
         logicalName = src.replace(/^dataverse:\s*/i, '').trim();
       } else if (src.toLowerCase().startsWith('file:')) {
@@ -1918,7 +1957,7 @@ function renderRefGrid(s) {
         </select>
       </div>
       <div class="rr-last-cell">
-        <span class="rr-last ${n ? 'ok' : ''}">${n ? n + ' rows' : 'Not loaded'}</span>
+        <span class="rr-last ${src ? 'ok' : ''}">${src ? n + ' rows' : 'Not loaded'}</span>
       </div>
       <div class="rr-logical-cell ${logicalName ? '' : 'rr-logical-empty'}" data-ref-logical="${kind}" title="${escapeHtml(logicalName)}">${escapeHtml(logicalName || '—')}</div>
       <div class="rr-act-cell">
@@ -2377,7 +2416,8 @@ function isFutureDateVal(val) {
 
 function isCalculatedColumn(headerName) {
   const norm = String(headerName || '').trim().toUpperCase();
-  return ['LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'CORRECT TEAM', 'CORRECT GROUP', 'MATCHED TEAM', 'MATCHED GROUP', 'POINTS'].includes(norm);
+  if (/^LO (OCCURRENCE|POINTS|COUNT) BY (DAY|WW)$/.test(norm)) return true;
+  return ['LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'CORRECT TEAM', 'CORRECT GROUP', 'MATCHED TEAM', 'MATCHED GROUP', 'POINTS', 'OFFER LETTER ACTION'].includes(norm);
 }
 
 function isMatchedNegotiatorColumn(headerName) {
@@ -2793,6 +2833,7 @@ async function reconcileClassCell(row, origIdx) {
 // A row "has an issue" if it has a Build mismatch, an invalid date, or any
 // cell that fails validation. Used by the "Show issues only" filter.
 function reviewRowHasIssue(origIdx, rowCells, buildErrMap) {
+  if (currentReviewTable.offerErrors && currentReviewTable.offerErrors[origIdx]) return true;
   if (buildErrMap && buildErrMap.has(origIdx)) return true;
   const headers = currentReviewTable.headers;
   const meta = currentReviewTable.meta || {};
@@ -2828,6 +2869,7 @@ function refreshReviewRow(tr, buildErrMap) {
   const headers = currentReviewTable.headers;
   const meta = currentReviewTable.meta || {};
   const buildErr = buildErrMap.get(origIdx);
+  const offerErr = (currentReviewTable.offerErrors || {})[origIdx];
   let hasInvalidDate = false;
 
   headers.forEach((h, cIdx) => {
@@ -2836,6 +2878,10 @@ function refreshReviewRow(tr, buildErrMap) {
     const m = meta[h] || { type: 'text' };
     const valStr = String(rowCells[cIdx] || '').trim();
     const valRes = validateCellValue(valStr, m, h);
+    if (h === 'OFFER LETTER ACTION' && offerErr) {
+      valRes.valid = false;
+      valRes.error = offerErr;
+    }
     if (isDateColumn(h) && isInvalidDateVal(rowCells[cIdx])) hasInvalidDate = true;
 
     const ctrl = td.querySelector('.cell-select, .cell-input');
@@ -2868,7 +2914,7 @@ function refreshReviewRow(tr, buildErrMap) {
     else td.removeAttribute('title');
   });
 
-  tr.classList.toggle('row-invalid-date', !!(hasInvalidDate || buildErr));
+  tr.classList.toggle('row-invalid-date', !!(hasInvalidDate || buildErr || offerErr));
 }
 
 function refreshReviewVisibleRows() {
@@ -2995,6 +3041,9 @@ function renderReviewBody() {
 
       const valStr = String(c || '').trim();
       const valRes = validateCellValue(valStr, meta, header);
+      if (header === 'OFFER LETTER ACTION' && currentReviewTable.offerErrors && currentReviewTable.offerErrors[origIdx]) {
+        valRes.valid = false; valRes.error = currentReviewTable.offerErrors[origIdx];
+      }
       if (!valRes.valid) {
         td.classList.add('cell-invalid');
         td.title = valRes.error;
@@ -3352,13 +3401,18 @@ function renderProductivityBody() {
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
     const cells = rows[rowIndex];
     if (!passesFilters(cells)) continue;
-    if (prodIssuesOnly && !prodRowHasIssue(cells)) continue;
+    if (prodIssuesOnly && !prodRowHasIssue(cells, rowIndex)) continue;
     matched++;
     if (shown >= MAX_RENDER) continue;
     shown++;
     const tr = document.createElement('tr');
 
     // Check for invalid dates in row
+    const calculationErrors = (prodTable.calculationErrors || {})[rowIndex];
+    if (calculationErrors) {
+      tr.title = calculationErrors.join('\n');
+      tr.classList.add('row-invalid-date');
+    }
     let hasInvalidDate = false;
     const headerList = labels || columns || [];
     headerList.forEach((h, cIdx) => {
@@ -3754,8 +3808,9 @@ function passesFilters(cells) {
 // present-but-non-matching name (red "no-match") is NOT treated as an issue —
 // it stays visible as a red cue but does not keep the row in the issues filter
 // or block publishing.
-function prodRowHasIssue(cells) {
+function prodRowHasIssue(cells, rowIndex) {
   if (!prodTable) return false;
+  if (rowIndex !== undefined && (prodTable.calculationErrors || {})[rowIndex]) return true;
   const { columns, labels, meta } = prodTable;
   const cols = columns || labels || [];
   const labs = labels || columns || [];
@@ -3786,7 +3841,7 @@ function countProdIssueRows(tableData) {
   if (!t || !t.rows) return 0;
   let count = 0;
   for (let i = 0; i < t.rows.length; i++) {
-    if (prodRowHasIssue(t.rows[i])) count++;
+    if ((t.calculationErrors || {})[i] || prodRowHasIssue(t.rows[i], i)) count++;
   }
   return count;
 }
@@ -3900,6 +3955,7 @@ function renderExplorerGrid() {
           <option value="municipality">Municipality Code</option>
           <option value="mapping">Mapping Status</option>
           <option value="build">Build Table</option>
+          ${lastState.mode === 'land-sourcing' ? '' : '<option value="offer">Offer Letter</option>'}
           <option value="existing">Existing Records</option>
         </select>
       </div>
@@ -4081,7 +4137,7 @@ function wire() {
   const btnFetchAll = $('btnFetchAllDv');
   if (btnFetchAll) {
     btnFetchAll.addEventListener('click', () => {
-      const kindsToFetch = Object.keys(selectedReferenceKinds).filter(k => selectedReferenceKinds[k]);
+      const kindsToFetch = availableReferenceTables().map(t => t.kind).filter(k => selectedReferenceKinds[k]);
       if (!kindsToFetch.length) {
         toast('Please check at least one table to fetch.', true);
         return;

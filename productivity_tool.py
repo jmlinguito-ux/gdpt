@@ -28,8 +28,11 @@ import math
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from difflib import SequenceMatcher
+import offer_letter as ol
 
 try:
     from openpyxl import load_workbook, Workbook
@@ -56,7 +59,7 @@ BATANGAS_NEGO_RECORD_COLUMNS = [
     'WITH OVERLAP ISSUE', 'LANDOWNER/AIF VERIFICATION', 'VERIFICATION OF HEIRS/AIF OF THE DECEASED RO/S',
     'HEIRS/AIF BASED ABROAD', 'NO NEXT OF KIN TO THE RO', 'AWAITING DECISION FROM THE LO', 'XCOORD', 'YCOORD',
     'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)',
-    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR',
+    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'OFFER LETTER ACTION',
 ]
 
 LAND_SOURCING_RECORD_COLUMNS = [
@@ -68,7 +71,7 @@ LAND_SOURCING_RECORD_COLUMNS = [
     'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR',
 ]
 
-DERIVED_TEMPLATE_COLUMNS = {'ID', 'MAPPING STATUS', 'MUNI CODE', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'LO'}
+DERIVED_TEMPLATE_COLUMNS = {'ID', 'MAPPING STATUS', 'MUNI CODE', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'LO', 'OFFER LETTER ACTION'}
 OPTIONAL_UPLOAD_COLUMNS = {'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)', 'LO'}
 # Derived review columns that calculate_review_rows recomputes — a manual edit to
 # one of these is remembered in row['_overrides'] so re-calculating keeps it.
@@ -98,6 +101,11 @@ MAPPING_STATUS_LABEL = {
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+# Decimal places stored for POINTS / LO POINTS / LO COUNT. Matches the 5-decimal
+# precision of the Dataverse productivity columns (so 1/3 is saved as 0.33333).
+POINTS_DECIMALS = 5
+
 
 def to_fixed(value: float, digits: int = 4) -> float:
     """Mimic JS Number.prototype.toFixed rounding (half away from zero)."""
@@ -424,12 +432,18 @@ def get_merged_numbered_column_value(base_column: str, header_indexes: dict, val
         elif canonical_header(header) == base_canon or canon_pattern.match(canonical_header(header)):
             matched_map[idx] = header
     matched = sorted(matched_map.items(), key=lambda hi: _numeric_key(hi[1]))
-    seen = []
+    # Compare individual names, not whole cells. A file can carry both a combined
+    # column ("GERALD MACABURAS/ALVIN ILAGAN") and numbered columns ("... 1" = GERALD,
+    # "... 2" = ALVIN); comparing whole cells produced
+    # "GERALD MACABURAS/ALVIN ILAGAN / GERALD MACABURAS / ALVIN ILAGAN".
+    seen, seen_keys = [], set()
     for idx, _ in matched:
         val = (values[idx] if idx < len(values) else '') or ''
-        val = val.strip()
-        if val and val not in seen:
-            seen.append(val)
+        for part in split_negotiators(val):
+            key = ' '.join(part.split()).upper()
+            if part and key not in seen_keys:
+                seen_keys.add(key)
+                seen.append(part)
     return ' / '.join(seen)
 
 
@@ -563,8 +577,63 @@ def get_area_index(row: dict) -> str:
     return str(row.get('AREA INDEX', row.get('AREA-INDEX', '')) or '')
 
 
+# Placeholders that mean "no person". "N/A" contains a slash, so it is protected
+# before splitting; otherwise "JUAN / N/A" became three people: JUAN, N and A.
+NAME_PLACEHOLDERS = {'N/A', 'NA', 'N.A.', 'N.A', 'NONE', 'NULL', '-', '--', '---'}
+_NA_TOKEN = re.compile(r'(?<![A-Z0-9])N\s*/\s*A(?![A-Z0-9])', re.IGNORECASE)
+
+
+def is_name_placeholder(value: str) -> bool:
+    return ' '.join(str(value or '').split()).upper().replace(' / ', '/') in NAME_PLACEHOLDERS \
+        or bool(re.fullmatch(r'\s*N\s*/\s*A\s*', str(value or ''), re.IGNORECASE))
+
+
 def split_negotiators(value: str) -> list[str]:
-    return [n.strip() for n in (value or '').split('/') if n.strip()]
+    """Split a multi-person cell on '/' into individual names.
+    'N/A' (and NA, NONE, -, NULL) is a placeholder, not a person, and is dropped:
+    'JUAN / N/A' -> ['JUAN'];  'N/A' -> []."""
+    protected = _NA_TOKEN.sub('N_A', str(value or ''))
+    names = []
+    for part in protected.split('/'):
+        part = re.sub(r'\s+N_A$', '', part.strip())  # 'JUAN N/A' -> 'JUAN'
+        if not part or part.upper() == 'N_A' or is_name_placeholder(part):
+            continue
+        names.append(part)
+    return names
+
+
+def name_cell_issue(value: str) -> str:
+    """Why a single-person name cell is not valid for a productivity row ('' if fine)."""
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if is_name_placeholder(text):
+        return 'is a placeholder (N/A), not a person'
+    if '/' in text:
+        return 'contains "/" (more than one person in one row - split it)'
+    return ''
+
+
+def publish_duplicate_key(area: str, date_value: str, lo: str, usability: str,
+                          checker: str, name: str) -> str:
+    """Duplicate identity used when publishing records / productivity.
+
+    Same parts as the Dataverse NEGO ID / SOURCING ID formula
+    (AREA INDEX - DATE - LO - DATA USABILITY - CHECKER) plus the RAW negotiator /
+    sourcer name. The matched name is deliberately NOT used: it can be blank or
+    change between runs, which made the same row look new and get published twice.
+    Returns '' when AREA INDEX or DATE is missing (no reliable identity).
+    """
+    def clean(v):
+        return ' '.join(str(v or '').split()).upper()
+    a = clean(area)
+    d = str(date_value or '').strip()
+    if not (a and d):
+        return ''
+    if is_excel_date_serial(d):
+        d = excel_serial_to_date_str(d)
+    d = clean(format_date_to_mm_dd_yyyy(d) or d)
+    return '___'.join([a, d, clean(lo), clean(usability), clean(checker), clean(name)])
 
 
 def get_lo_occurrence_name(row: dict) -> str:
@@ -994,10 +1063,17 @@ def get_derived_mapping_status(row: dict, source_rows: list[dict], existing_reco
         else:
             same_area_batch = [it for it in source_rows if (it.get('AREA INDEX') or it.get('AREA-INDEX') or get_derived_area_index(it, municipality_codes)).strip().lower() == area_index]
             same_day_batch = [it for it in same_area_batch if get_normalized_record_date(it) == row_date]
-        if len(same_day_batch) > 1:
-            highest_in_batch = max(same_day_batch, key=_get_row_order_key)
-            if row is not highest_in_batch and _get_row_order_key(highest_in_batch) > row_order:
-                return 'DUPLICATE'
+        names = {_name_key(n) for n in split_negotiators(row.get('NEGOTIATOR NAME') or row.get('LSA NAME') or '')}
+        classification = str(row.get('CLASSIFICATION') or '').strip().upper()
+        earlier_names = set()
+        ordered = sorted(enumerate(same_day_batch), key=lambda item: (_get_row_order_key(item[1]), item[0]))
+        for _, peer in ordered:
+            if peer is row:
+                break
+            if str(peer.get('CLASSIFICATION') or '').strip().upper() == classification:
+                earlier_names.update(_name_key(n) for n in split_negotiators(peer.get('NEGOTIATOR NAME') or peer.get('LSA NAME') or ''))
+        if names and classification and names <= earlier_names:
+            return 'DUPLICATE'
 
     # 3. Historical check: If present in Dataverse history or existing records, it's an indexed property update
     if existing_area_set is not None:
@@ -1206,11 +1282,21 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
             source_by_area[ai].append(sr)
 
     expanded: list[dict] = []
-    for row in rows:
+    for source_index, row in enumerate(rows):
         derived_area_index = get_derived_area_index(row, municipality_codes)
         ai_key = derived_area_index.strip().lower()
         record_date = row.get('NEGO DATE') or row.get('REPORT DATE') or ''
         negotiators = split_negotiators(row.get('NEGOTIATOR NAME') or row.get('LSA NAME') or '')
+        # Count each person once per report. Some source cells repeat the names
+        # (e.g. "GERALD MACABURAS/ALVIN ILAGAN / GERALD MACABURAS / ALVIN ILAGAN"),
+        # which used to create 4 productivity rows at 0.25 instead of 2 rows at 0.5.
+        unique_names, seen_names = [], set()
+        for n in negotiators:
+            nk = ' '.join(n.split()).upper()
+            if nk not in seen_names:
+                seen_names.add(nk)
+                unique_names.append(n)
+        negotiators = unique_names
         names_to_render = negotiators if negotiators else ['']
         checker_row = {**row, 'AREA INDEX': derived_area_index, 'AREA-INDEX': derived_area_index}
         
@@ -1238,17 +1324,20 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
                 'NEGOTIATOR NAME': name, 'NEGO CODE': row.get('NEGO CODE', '') or '',
                 'NEGOTIATOR MATCH': negotiator_match, 'DATA USABILITY': data_usability,
                 'BUILD': row.get('BUILD', '') or '',
+                **({'OFFER LETTER ACTION': row.get('OFFER LETTER ACTION', '') or ''} if mode == 'negotiation' else {}),
                 'UNIQUE ID': f"{derived_area_index}{record_date}{checker}", 'CHECKER': checker, 'POINTS': 0,
                 'NEGO DISTINCTION': '', 'LO': get_lo_occurrence_name(row), 'LO OCCURRENCE KEY': get_lo_occurrence_name(row),
                 'LO OCCURRENCE BY DAY': 0, 'LO OCCURRENCE BY WW': 0, 'LO POINTS BY DAY': 0, 'LO POINTS BY WW': 0,
                 'LO COUNT BY DAY': 0, 'LO COUNT BY WW': 0,
                 'CORRECT TEAM': corr_team,
                 'CORRECT GROUP': corr_group,
+                '_historical_sourcer_name': historical_sourcer_name(name, record_date, mode),
+                '_source_row_index': source_index,
             })
 
     # 2. O(N) pre-aggregation for Points and LO counts
     uid_counts = collections.Counter(r.get('UNIQUE ID') for r in expanded)
-    rows_with_points = [{**r, 'POINTS': to_fixed(1 / (uid_counts.get(r.get('UNIQUE ID'), 1) or 1), 4)} for r in expanded]
+    rows_with_points = [{**r, 'POINTS': to_fixed(1 / (uid_counts.get(r.get('UNIQUE ID'), 1) or 1), POINTS_DECIMALS)} for r in expanded]
 
     # Pre-index rows_with_points and existing_records by (area_index, work_week) for instant distinction lookups
     rwp_by_area_ww: dict[tuple[str, str], list[dict]] = collections.defaultdict(list)
@@ -1290,15 +1379,15 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
         if week_count < 1:
             week_count = 1
 
-        lo_points_by_day = to_fixed(1 / day_count, 4)
-        lo_points_by_ww = to_fixed(1 / week_count, 4)
+        lo_points_by_day = to_fixed(1 / day_count, POINTS_DECIMALS)
+        lo_points_by_ww = to_fixed(1 / week_count, POINTS_DECIMALS)
 
         result.append({
             **row,
             'NEGO DISTINCTION': get_nego_distinction(row, rwp_by_area_ww.get((ai_key, ww_val), []), existing_by_area_ww.get((ai_key, ww_val), []), mode),
             'LO OCCURRENCE BY DAY': day_count, 'LO OCCURRENCE BY WW': week_count,
             'LO POINTS BY DAY': lo_points_by_day, 'LO POINTS BY WW': lo_points_by_ww,
-            'LO COUNT BY DAY': to_fixed(day_count * lo_points_by_day, 4), 'LO COUNT BY WW': 1,
+            'LO COUNT BY DAY': to_fixed(day_count * lo_points_by_day, POINTS_DECIMALS), 'LO COUNT BY WW': 1,
         })
     return result
 
@@ -1311,28 +1400,108 @@ def normalize_name_part(value: str) -> str:
     return re.sub(r'[^a-z]', '', (value or '').lower())
 
 
+# --- Fuzzy name lookup against TEAM COMPOSITION ---------------------------------
+NAME_SUFFIXES = {'JR', 'SR', 'II', 'III', 'IV'}
+
+
+def _person_tokens(value) -> list[str]:
+    s = unicodedata.normalize('NFKD', str(value or '')).encode('ascii', 'ignore').decode().upper()
+    if ',' in s:  # "PADILLA, EMMANUEL CARLO" -> "EMMANUEL CARLO PADILLA"
+        last, _, first = s.partition(',')
+        s = first + ' ' + last
+    s = re.sub(r'[.\-_]', ' ', s)
+    s = re.sub(r'[^A-Z ]', '', s)
+    return [t for t in s.split() if t not in NAME_SUFFIXES]
+
+
+def _sim(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _token_alignment(small: list[str], large: list[str]):
+    """Match every token of `small` to a different token of `large`.
+    Returns (avg similarity, matched indexes in large) or None."""
+    used, scores = set(), []
+    for t in small:
+        best, best_j = 0.0, -1
+        for j, u in enumerate(large):
+            if j in used:
+                continue
+            if t == u:
+                s = 1.0
+            elif len(t) == 1 or len(u) == 1:          # initial: "J" ~ "JOHN"
+                s = 0.9 if t[0] == u[0] else 0.0
+            elif len(t) == len(u) >= 3 and sum(a != b for a, b in zip(t, u)) == 1:
+                s = 0.85                                # one wrong letter: "AVE" ~ "ACE"
+            elif min(len(t), len(u)) >= 4:
+                s = _sim(t, u)
+            else:
+                s = 0.0
+            if s > best:
+                best, best_j = s, j
+        if best < 0.8:
+            return None
+        used.add(best_j)
+        scores.append(best)
+    return sum(scores) / len(scores), used
+
+
+def _pair_score(src: list[str], opt: list[str]) -> float:
+    if not src or not opt:
+        return 0.0
+    if src == opt:
+        return 1.0
+    if ''.join(src) == ''.join(opt):                   # "DE LEON" vs "DELEON"
+        return 0.99
+    small, large = (src, opt) if len(src) <= len(opt) else (opt, src)
+    best = 0.0
+    if len(small) >= 2 or len(large) == 1:
+        al = _token_alignment(small, large)
+        if al:
+            avg, used = al
+            extra = len(large) - len(small)
+            # extra names allowed: one middle name, or several if both ends line up
+            if extra <= 1 or (0 in used and len(large) - 1 in used):
+                if any(len(t) > 1 for t in small):
+                    best = avg - 0.02 * extra
+    whole = _sim(''.join(src), ''.join(opt))          # spacing / one-letter typos
+    if whole >= 0.88:
+        best = max(best, whole - 0.03)
+    return best
+
+
+def fuzzy_person_match(name: str, options: list[str], cache: dict | None = None) -> str:
+    """Best TEAM COMPOSITION name for `name`, tolerant of typos, missing or extra
+    middle names, swapped order, JR/SR, initials and "LAST, FIRST".
+    Returns '' when nothing is close enough or two people are equally close."""
+    key = str(name or '').strip()
+    if not key:
+        return ''
+    if cache is not None and key in cache:
+        return cache[key]
+    src = _person_tokens(key)
+    scored = sorted(((_pair_score(src, _person_tokens(o)), o) for o in options if str(o or '').strip()),
+                    key=lambda x: -x[0])
+    result = ''
+    if scored and scored[0][0] >= 0.85:
+        top, second = scored[0], next((s for s in scored[1:] if _person_tokens(s[1]) != _person_tokens(scored[0][1])), (0.0, ''))
+        if top[0] >= 0.99 or top[0] - second[0] >= 0.05:
+            result = top[1]
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+_fuzzy_cache: dict[tuple, dict] = {}
+
+
 def get_fuzzy_negotiator_match(source_name: str, options: list[str]) -> str:
-    trimmed = (source_name or '').strip()
-    if not trimmed:
-        return ''
-    compact = normalize_name_part(trimmed)
-    for option in options:
-        if normalize_name_part(option) == compact:
-            return option
-    source_parts = [normalize_name_part(p) for p in re.split(r'[\s._,-]+', trimmed.lower()) if normalize_name_part(p)]
-    if len(source_parts) < 2:
-        return ''
-    first_initial = source_parts[0][0]
-    last_token = source_parts[-1]
-    for option in options:
-        option_parts = [normalize_name_part(p) for p in re.split(r'[\s._,-]+', option.lower()) if normalize_name_part(p)]
-        if not option_parts:
-            continue
-        option_first = option_parts[0]
-        option_last = option_parts[-1]
-        if option_first and option_last and option_first.startswith(first_initial) and option_last == last_token:
-            return option
-    return ''
+    """TEAM COMPOSITION name for `source_name` ('' if no confident match)."""
+    cache = _fuzzy_cache.setdefault(tuple(options), {})
+    if len(_fuzzy_cache) > 20:
+        _fuzzy_cache.clear()
+        cache = _fuzzy_cache.setdefault(tuple(options), {})
+    return fuzzy_person_match(source_name, options, cache)
 
 
 def get_match_status(source_value, lookup_value) -> str:
@@ -1343,16 +1512,152 @@ def get_match_status(source_value, lookup_value) -> str:
     return 'MATCH' if s == l else 'NO MATCH'
 
 
-def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> list[dict]:
+def _name_key(value) -> str:
+    return ' '.join(str(value or '').split()).lower()
+
+
+def historical_sourcer_name(name, record_date, mode='negotiation') -> str:
+    """Keep the original employee identity on sourcing visits before Sep 2026."""
+    if mode != 'land-sourcing':
+        return ''
+    normalized_date = format_date_to_mm_dd_yyyy(record_date)
+    try:
+        visit_date = datetime.strptime(normalized_date, '%m/%d/%Y')
+    except (ValueError, TypeError):
+        return ''
+    if visit_date >= datetime(2026, 9, 1):
+        return ''
+    return ' '.join(str(name or '').split()).upper()
+
+
+def team_name_set(teams: list[dict]) -> list[str]:
+    """Employee names from the TEAM COMPOSITION reference (original spelling)."""
+    out, seen = [], set()
+    for t in (teams or []):
+        name = ' '.join(str(t.get('employeeName') or '').split())
+        if name and _name_key(name) not in seen:
+            seen.add(_name_key(name))
+            out.append(name)
+    return out
+
+
+def apply_team_name_usability(row: dict, team_names) -> dict:
+    """Look the row's person up in TEAM COMPOSITION with a fuzzy match (typos,
+    missing middle name, JR, swapped order...). Found -> MATCHED NEGOTIATOR NAME
+    is set to the TEAM COMPOSITION spelling. Not resolved -> DATA USABILITY = INVALID.
+    The usability the row had otherwise is kept in '_base_data_usability' so fixing
+    the name brings it back. Does nothing if TEAM COMPOSITION is not loaded."""
+    base = row.get('_base_data_usability')
+    if base is None:
+        base = row.get('DATA USABILITY', '') or ''
+    row['_base_data_usability'] = base
+    options = list(team_names or [])
+    historical_resolution = row.get('_historical_name_resolution')
+    if historical_resolution is not None:
+        row['MATCHED NEGOTIATOR NAME'] = historical_resolution.get('name', '')
+        row['DATA USABILITY'] = base if historical_resolution.get('name') else 'INVALID'
+        return row
+    historical = row.get('_historical_sourcer_name')
+    if historical:
+        row['MATCHED NEGOTIATOR NAME'] = historical
+        # Keep the current usability rule, but never substitute a different
+        # current employee for the original historical sourcer.
+        row['DATA USABILITY'] = base if not options or any(_name_key(n) == _name_key(historical) for n in options) else 'INVALID'
+        return row
+    if not options:
+        row['DATA USABILITY'] = base
+        return row
+    matched = str(row.get('MATCHED NEGOTIATOR NAME') or row.get('MATCHED SOURCER') or '').strip()
+    raw = str(row.get('NEGOTIATOR NAME') or row.get('LSA NAME') or '').strip()
+    found = ''
+    if not ('/' in matched or '/' in raw):
+        # a filled-in matched name is the person; the raw name is used only when it is blank
+        found = get_fuzzy_negotiator_match(matched or raw, options)
+    if found:
+        row['MATCHED NEGOTIATOR NAME'] = found
+        row['DATA USABILITY'] = base
+    else:
+        row['DATA USABILITY'] = 'INVALID'
+    return row
+
+
+def recompute_valid_points(rows: list[dict]) -> list[dict]:
+    """Points are shared by the VALID rows of a visit only (same UNIQUE ID); an INVALID
+    row gets 0. LO columns follow: INVALID rows get 0, and a visit whose rows are ALL
+    invalid no longer counts toward its LO's occurrences (by day / by work week).
+    Edits `rows` in place and returns it. Safe to call again after any edit."""
+    groups: dict = collections.defaultdict(list)
+    for r in rows:
+        groups[r.get('UNIQUE ID')].append(r)
+
+    def is_invalid(r):
+        return str(r.get('DATA USABILITY') or '').strip().upper() == 'INVALID'
+
+    # visits (one per UNIQUE ID + LO) that have no valid row left
+    dead_day: collections.Counter = collections.Counter()
+    dead_ww: collections.Counter = collections.Counter()
+    dead_ids = set()
+    for uid, grp in groups.items():
+        if all(is_invalid(r) for r in grp):
+            dead_ids.add(uid)
+            lo = str(grp[0].get('LO OCCURRENCE KEY') or grp[0].get('LO') or '').strip().lower()
+            if lo:
+                dead_day[(grp[0].get('NEGO DATE'), lo)] += 1
+                dead_ww[(str(grp[0].get('WORK WEEK') or ''), lo)] += 1
+
+    for uid, grp in groups.items():
+        valid = [r for r in grp if not is_invalid(r)]
+        share = to_fixed(1 / len(valid), POINTS_DECIMALS) if valid else 0.0
+        for r in grp:
+            lo = str(r.get('LO OCCURRENCE KEY') or r.get('LO') or '').strip().lower()
+            r.setdefault('_base_lo_day', r.get('LO OCCURRENCE BY DAY'))
+            r.setdefault('_base_lo_ww', r.get('LO OCCURRENCE BY WW'))
+            if is_invalid(r):
+                r['POINTS'] = 0.0
+                r['LO POINTS BY DAY'] = 0.0
+                r['LO POINTS BY WW'] = 0.0
+                r['LO COUNT BY DAY'] = round_whole_number_text(0)
+                r['LO COUNT BY WW'] = 0
+                continue
+            r['POINTS'] = share
+            try:
+                base_day = float(r.get('_base_lo_day') or 1)
+                base_ww = float(r.get('_base_lo_ww') or 1)
+            except (TypeError, ValueError):
+                base_day = base_ww = 1.0
+            day = max(1, int(base_day) - (dead_day.get((r.get('NEGO DATE'), lo), 0) if lo else 0))
+            ww = max(1, int(base_ww) - (dead_ww.get((str(r.get('WORK WEEK') or ''), lo), 0) if lo else 0))
+            by_day = to_fixed(1 / day, POINTS_DECIMALS)
+            r['LO OCCURRENCE BY DAY'] = day
+            r['LO OCCURRENCE BY WW'] = ww
+            r['LO POINTS BY DAY'] = by_day
+            r['LO POINTS BY WW'] = to_fixed(1 / ww, POINTS_DECIMALS)
+            r['LO COUNT BY DAY'] = round_whole_number_text(to_fixed(day * by_day, POINTS_DECIMALS))
+            r['LO COUNT BY WW'] = 1
+    return rows
+
+
+def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict], historical_name_reference=None) -> list[dict]:
+    team_names = team_name_set(teams)
     negotiator_options = sorted({(t.get('employeeName', '') or '').strip() for t in teams if (t.get('employeeName', '') or '').strip()})
     lookup = build_team_lookup(teams)
+    if historical_name_reference is not None:
+        import historical_names as hn
+        historical_team_lookup = {hn.normalize(n): value for n, value in lookup.items()}
 
     enriched = []
     for index, row in enumerate(productivity_rows):
-        matched = str(row.get('MATCHED NEGOTIATOR NAME', '') or '').strip()
-        if not matched:
-            matched = get_fuzzy_negotiator_match(str(row.get('NEGOTIATOR NAME', '') or ''), negotiator_options)
-        defaults = lookup.get(matched.strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
+        if historical_name_reference is not None and row.get('_historical_sourcer_name'):
+            import historical_names as hn
+            row = {**row, '_historical_name_resolution': hn.resolve(row.get('NEGOTIATOR NAME'), historical_name_reference)}
+        historical = row.get('_historical_sourcer_name')
+        resolution = row.get('_historical_name_resolution')
+        matched = resolution.get('name', '') if resolution is not None else historical or str(row.get('MATCHED NEGOTIATOR NAME', '') or '').strip()
+        found = ''
+        if not historical and team_names and '/' not in matched:
+            found = get_fuzzy_negotiator_match(matched or str(row.get('NEGOTIATOR NAME', '') or ''), team_names)
+        matched = found or matched
+        defaults = (historical_team_lookup.get(matched) if resolution is not None else lookup.get(matched.strip().lower())) or {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'}
         team_val = normalize_team(row.get('TEAM'))
         group_val = normalize_group(row.get('GROUP'))
         enriched.append({
@@ -1368,6 +1673,9 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> l
             # workspace loadProductivityRows rounds LO COUNT BY DAY to a whole number
             'LO COUNT BY DAY': round_whole_number_text(row.get('LO COUNT BY DAY')),
         })
+        apply_team_name_usability(enriched[-1], team_names)
+    if team_names:
+        recompute_valid_points(enriched)  # INVALID rows get 0; valid rows share the point
     return enriched
 
 
@@ -1378,7 +1686,7 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict]) -> l
 OUTPUT_COLUMNS = [
     'ITEM #', 'AREA INDEX', 'NEGO DATE', 'WORK WEEK', 'PROVINCE', 'MUNICIPALITY', 'BARANGAY', 'TYPE OF REPORT', 'ACTION',
     'NEGOTIATOR NAME', 'NEGO CODE', 'MATCHED NEGOTIATOR NAME', 'TEAM', 'CORRECT TEAM', 'TEAM MATCH', 'GROUP',
-    'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'BUILD', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'LO', 'POINTS',
+    'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'BUILD', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'OFFER LETTER ACTION', 'LO', 'POINTS',
     'LO OCCURRENCE BY DAY', 'LO OCCURRENCE BY WW', 'LO POINTS BY DAY', 'LO POINTS BY WW', 'LO COUNT BY DAY', 'LO COUNT BY WW',
 ]
 
@@ -1387,7 +1695,7 @@ NEGOTIATION_HIDDEN = {'NEGO CODE'}  # NEGO CODE kept? app hides only in visibleP
 
 
 def get_output_columns(mode: str) -> list[str]:
-    hidden = LAND_SOURCING_HIDDEN if mode == 'land-sourcing' else set()
+    hidden = (LAND_SOURCING_HIDDEN | {'OFFER LETTER ACTION'}) if mode == 'land-sourcing' else set()
     return [c for c in OUTPUT_COLUMNS if c not in hidden]
 
 
@@ -1509,6 +1817,7 @@ REFERENCE_TEMPLATE_HEADERS = {
     'municipality': ['Municipality', 'MuniCode', 'Province'],
     'mapping': ['Description', 'Mapping Status', 'Data Usability'],
     'build': ['Area Index', 'Build', 'Work Week'],
+    'offer': [label for _, label in ol.FIELDS],
     'existing': ['ID', 'AREA-INDEX'],
 }
 
@@ -1518,12 +1827,13 @@ REFERENCE_VIEW_COLUMNS = {
     'municipality': [('municipality', 'Municipality'), ('muniCode', 'MuniCode'), ('province', 'Province')],
     'mapping': [('description', 'Description'), ('mappingLabel', 'Mapping Status'), ('dataUsability', 'Data Usability')],
     'build': [('areaIndex', 'Area Index'), ('build', 'Build'), ('workWeek', 'Work Week')],
+    'offer': ol.FIELDS,
     'existing': [('iD1', 'ID'), ('aREAINDEX', 'AREA-INDEX'), ('date', 'Record Date'), ('classification', 'Classification')],
 }
 
 REFERENCE_LABELS = {
     'team': 'Team Composition', 'municipality': 'Municipality Code',
-    'mapping': 'Mapping Status', 'build': 'Build Table', 'existing': 'Existing Records',
+    'mapping': 'Mapping Status', 'build': 'Build Table', 'existing': 'Existing Records', 'offer': 'Offer Letter',
 }
 
 
@@ -1556,6 +1866,15 @@ def load_single_reference(path: str, kind: str) -> list[dict]:
     """Load one reference table (team/municipality/mapping/build/existing) from a file."""
     rows = _read_records_from_file(path)
     out: list[dict] = []
+    if kind == 'offer':
+        for d in rows:
+            item = {key: ol.validate_cell(key, _pick(d, label)) for key, label in ol.FIELDS}
+            if not (item['areaIndex'] or item['titleNo']):
+                raise ValueError('Each OFFER LETTER entry requires AREA INDEX or TITLE NO.')
+            if not item['offerDate'] or not item['offerType']:
+                raise ValueError('Each OFFER LETTER entry requires OFFER DATE and OFFER TYPE.')
+            out.append(item)
+        return out
     if kind == 'team':
         for d in rows:
             out.append({
@@ -1598,11 +1917,13 @@ def load_single_reference(path: str, kind: str) -> list[dict]:
     if kind == 'existing':
         for d in rows:
             area = _pick(d, 'AREA-INDEX', 'Area Index', 'AreaIndex', 'AREA INDEX')
+            index = _pick(d, 'INDEX NO', 'Index No', 'IndexNo')
             raw_date = _pick(d, 'Record Date', 'RECORD DATE', 'NEGO DATE', 'Nego Date', 'REPORT DATE', 'Report Date', 'SOURCING DATE', 'Sourcing Date', 'DATE', 'Date')
             classification = _pick(d, 'Classification', 'CLASSIFICATION', 'Class', 'CLASS')
-            if area:
+            if area or index:
                 out.append({
                     'aREAINDEX': area,
+                    'indexNo': index,
                     'iD1': _to_int(_pick(d, 'ID', 'ID1', 'ITEM #', 'ITEM NO')),
                     'date': raw_date,
                     'NEGO DATE': raw_date,
@@ -1633,7 +1954,7 @@ def write_reference_template(path: str, kind: str) -> None:
 
 
 def load_existing_records(path: str) -> list[dict]:
-    """Existing record rows -> [{aREAINDEX, iD1, date, classification}] for INDEXED detection + latest ID."""
+    """Existing rows for indexing, checker history, offer visit dates, and latest ID."""
     ext = os.path.splitext(path)[1].lower()
     records = []
     if ext in ('.csv', '.tsv', '.txt'):
@@ -1647,6 +1968,7 @@ def load_existing_records(path: str) -> list[dict]:
                 cls_v = _pick(d, 'Classification', 'CLASSIFICATION', 'Class', 'CLASS')
                 records.append({
                     'aREAINDEX': _pick(d, 'AREA-INDEX', 'AREA INDEX', 'AreaIndex'),
+                    'indexNo': _pick(d, 'INDEX NO', 'Index No', 'IndexNo'),
                     'iD1': _to_int(_pick(d, 'ID', 'ID1', 'ITEM #', 'ITEM NO')),
                     'date': raw_d,
                     'NEGO DATE': raw_d,
@@ -1659,11 +1981,13 @@ def load_existing_records(path: str) -> list[dict]:
         for ws in wb.worksheets:
             for d in _sheet_rows_to_dicts(ws):
                 area = _pick(d, 'AREA-INDEX', 'AREA INDEX', 'AreaIndex')
+                index = _pick(d, 'INDEX NO', 'Index No', 'IndexNo')
                 raw_d = _pick(d, 'Record Date', 'RECORD DATE', 'NEGO DATE', 'Nego Date', 'REPORT DATE', 'Report Date', 'SOURCING DATE', 'Sourcing Date', 'DATE', 'Date')
                 cls_v = _pick(d, 'Classification', 'CLASSIFICATION', 'Class', 'CLASS')
-                if area:
+                if area or index:
                     records.append({
                         'aREAINDEX': area,
+                        'indexNo': index,
                         'iD1': _to_int(_pick(d, 'ID', 'ID1', 'ITEM #', 'ITEM NO')),
                         'date': raw_d,
                         'NEGO DATE': raw_d,
@@ -1839,7 +2163,7 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
             group_choices.append('GROUP 0')
         return {'type': 'choice', 'choices': sorted(group_choices)}
 
-    if col_upper == 'CHECKER':
+    if col_upper in ('CHECKER', 'OFFER LETTER ACTION'):
         return {'type': 'text'}
 
     if col_upper in ('SOURCING DISTINCTION', 'NEGO DISTINCTION', 'DISTINCTION'):
@@ -2000,7 +2324,11 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
                           existing_area_set: set[str] | None = None,
                           ignore_build_work_week: bool = False,
                           mode: str = 'negotiation',
-                          history_ready: bool = True) -> list[dict]:
+                          history_ready: bool = True,
+                          offer_rows: list[dict] | None = None,
+                          offer_history: list[dict] | None = None,
+                          offer_reference_ready: bool = True,
+                          offer_history_ready: bool = True) -> list[dict]:
     """Apply the review-table derivations (runReviewCalculations)."""
     if existing_area_set is None and existing_records:
         existing_area_set = {
@@ -2041,6 +2369,9 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
         if ww_norm is not None and (b_ai, ww_norm) not in build_by_area_and_ww:
             build_by_area_and_ww[(b_ai, ww_norm)] = _build_value_or_balance(b_val)
 
+    offer_actions = (ol.calculate_actions(area_calculated, offer_rows or [], offer_history or [],
+                                         offer_reference_ready, offer_history_ready)
+                     if mode == 'negotiation' else [])
     calculated = []
     for row in area_calculated:
         derived_ms = get_derived_mapping_status(row, area_calculated, existing_records, municipality_codes,
@@ -2067,6 +2398,13 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
         if overrides:
             for k, v in overrides.items():
                 calc[k] = v
+        if mode == 'negotiation':
+            action, issue = offer_actions[len(calculated)]
+            calc['OFFER LETTER ACTION'] = action
+            calc['_offer_letter_issue'] = issue
+        else:
+            calc.pop('OFFER LETTER ACTION', None)
+            calc.pop('_offer_letter_issue', None)
         calculated.append(calc)
     return calculated
 

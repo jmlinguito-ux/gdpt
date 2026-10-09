@@ -148,7 +148,7 @@
   function noteFor(view) {
     const s = st();
     switch (view) {
-      case 'load': return refSelectedCount() + ' of 5 tables selected';
+      case 'load': return refSelectedCount() + ' of ' + document.querySelectorAll('#refGrid [data-ref-check]').length + ' tables selected';
       case 'review': return s.rowCount ? 'Calculate, then generate productivity' : 'Load a transaction file first';
       case 'productivity': {
         if (!s.productivityCount) return 'Nothing generated yet';

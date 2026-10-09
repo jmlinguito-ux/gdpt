@@ -479,6 +479,15 @@ class DataverseClient:
             return s_val
             
         attr_type = attr_meta.get('type')
+        if attr_type == 'Picklist' and attr_meta.get('label', '').upper() == 'OFFER TYPE':
+            url = (f"{self.api_root}EntityDefinitions(LogicalName='{entity_logical}')/Attributes"
+                   f"(LogicalName='{attr_meta['logical']}')/Microsoft.Dynamics.CRM.PicklistAttributeMetadata?$expand=OptionSet")
+            options = (self._get(url).get('OptionSet') or {}).get('Options', [])
+            for option in options:
+                labels = (option.get('Label') or {}).get('LocalizedLabels', [])
+                if any(str(l.get('Label', '')).strip().upper() == s_val.upper() for l in labels):
+                    return option['Value']
+            raise ValueError('OFFER TYPE must be OFFER LETTER or COUNTER OFFER.')
         attr_log = (attr_meta.get('logical', '') or '').lower()
         attr_label = (attr_meta.get('label', '') or '').lower()
 
@@ -533,7 +542,7 @@ class DataverseClient:
         get_existing_keys() exposes just the keys; the override publish path uses
         the id so it can PATCH the matched record instead of skipping it.
         """
-        from productivity_tool import format_date_to_mm_dd_yyyy, is_excel_date_serial, excel_serial_to_date_str
+        from productivity_tool import publish_duplicate_key
         info = self.get_entity_info(entity_logical)
         entity_set = info.get('entitySetName')
         if not entity_set:
@@ -551,22 +560,22 @@ class DataverseClient:
                      or amap.get(_norm('cr63f_reportdate')) or amap.get(_norm('REPORT DATE'))
                      or amap.get(_norm('SOURCING DATE')) or amap.get(_norm('cr63f_sourcingdate'))
                      or amap.get(_norm('DATE')) or amap.get(_norm('cr63f_date')))
-        # Matched negotiator (with raw-negotiator fallback) scopes the AREA+DATE
-        # duplicate key so the same property/day by DIFFERENT negotiators is not a
-        # duplicate. Kept symmetric with app.py _row_keys on the client side.
-        mneg_attr = (amap.get(_norm('MATCHED NEGOTIATOR NAME')) or amap.get(_norm('cr63f_matchednegotiatorname'))
-                     or amap.get(_norm('MATCHED SOURCER')) or amap.get(_norm('cr63f_matchedsourcer'))
-                     or amap.get(_norm('MATCHED SOURCER NAME')) or amap.get(_norm('cr63f_matchedsourcername'))
-                     or amap.get(_norm('MATCHED NEGOTIATOR')))
+        # Raw negotiator / sourcer name (NOT the matched name: it can be blank or change
+        # between runs). Together with LO, DATA USABILITY and CHECKER this mirrors the
+        # NEGO ID / SOURCING ID formula. Kept symmetric with app.py _row_keys.
         neg_attr = (amap.get(_norm('NEGOTIATOR NAME')) or amap.get(_norm('cr63f_negotiatorname'))
                     or amap.get(_norm('SOURCER NAME')) or amap.get(_norm('cr63f_sourcername'))
                     or amap.get(_norm('cr63f_sourcer')) or amap.get(_norm('LSA NAME')) or amap.get(_norm('cr63f_lsaname')))
+        lo_attr = amap.get(_norm('cr63f_lo')) or amap.get(_norm('LO'))
+        use_attr = amap.get(_norm('cr63f_datausability')) or amap.get(_norm('DATA USABILITY'))
+        chk_attr = (amap.get(_norm('cr63f_checker')) or amap.get(_norm('CHECKER'))
+                    or amap.get(_norm('cr63f_duplicatechecker')) or amap.get(_norm('DUPLICATE CHECKER')))
 
         if not (area_attr and date_attr):
             return {}
 
         fetch_attrs = []
-        for a in (area_attr, date_attr, mneg_attr, neg_attr, id_attr):
+        for a in (area_attr, date_attr, neg_attr, lo_attr, use_attr, chk_attr, id_attr):
             if a and a.get('logical') and a.get('logical') not in fetch_attrs:
                 fetch_attrs.append(a.get('logical'))
         if pk and pk not in fetch_attrs:
@@ -586,25 +595,16 @@ class DataverseClient:
                 return 0
         records = sorted(records, key=_idnum)
 
+        def _val(r, attr):
+            return (r.get(attr.get('logical'), '') if attr else '') or ''
+
         key_map: dict[str, str] = {}
         for r in records:
             rid = str(r.get(pk, '') or '').strip('{}') if pk else ''
-            if area_attr and date_attr:
-                av = str(r.get(area_attr.get('logical'), '') or '').strip().upper()
-                raw_d = str(r.get(date_attr.get('logical'), '') or '').strip()
-                mn = str((r.get(mneg_attr.get('logical'), '') if mneg_attr else '') or '').strip().upper()
-                if not mn:
-                    mn = str((r.get(neg_attr.get('logical'), '') if neg_attr else '') or '').strip().upper()
-                if av and raw_d:
-                    key_map[f"{av}___{raw_d.upper()}___{mn}"] = rid
-                    if is_excel_date_serial(raw_d):
-                        raw_d = excel_serial_to_date_str(raw_d)
-                    norm_d = format_date_to_mm_dd_yyyy(raw_d)
-                    if norm_d:
-                        key_map[f"{av}___{norm_d.upper()}___{mn}"] = rid
-                        if len(norm_d) == 10 and norm_d[2] == '/' and norm_d[5] == '/':
-                            iso_d = f"{norm_d[6:10]}-{norm_d[0:2]}-{norm_d[3:5]}"
-                            key_map[f"{av}___{iso_d.upper()}___{mn}"] = rid
+            key = publish_duplicate_key(_val(r, area_attr), _val(r, date_attr), _val(r, lo_attr),
+                                        _val(r, use_attr), _val(r, chk_attr), _val(r, neg_attr))
+            if key:
+                key_map[key] = rid
         return key_map
 
 
@@ -724,6 +724,7 @@ class DataverseClient:
             'NEGOTIATOR MATCH': ['NEGOTIATOR MATCH', 'SOURCER MATCH', 'SOURCING MATCH', 'cr63f_sourcermatch', 'cr63f_negotiatormatch'],
             'SOURCER MATCH': ['SOURCER MATCH', 'NEGOTIATOR MATCH', 'SOURCING MATCH', 'cr63f_sourcermatch', 'cr63f_negotiatormatch'],
             'BUILD': ['BUILD', 'cr63f_build'],
+            'OFFER LETTER ACTION': ['OFFER LETTER ACTION', 'cr63f_offerletteraction'],
         }
 
         col_map = {}
@@ -759,6 +760,12 @@ class DataverseClient:
                                if str(m.get('logical', '')).lower() == str(build_logical).lower()), {})
             if build_meta.get('type') != 'String':
                 raise ValueError(f"Productivity table '{entity_logical}' BUILD column must be single-line text.")
+
+        if 'OFFER LETTER ACTION' in sample_keys and 'nego' in entity_logical.lower():
+            field = col_map.get('OFFER LETTER ACTION')
+            meta = next((m for m in amap.values() if m.get('logical') == field), {})
+            if not field or meta.get('type') != 'String':
+                raise ValueError(f"Table '{entity_logical}' needs a writable OFFER LETTER ACTION text column.")
 
         # Find Date columns (DateTime / Date fields)
         date_attrs = []
@@ -1155,6 +1162,14 @@ class DataverseClient:
 
 
     _CANONICAL_FIELD_NAMES = {
+        'offer': {
+            'areaIndex': ('AREA INDEX', 'cr63f_areaindex'), 'titleNo': ('TITLE NO', 'cr63f_titleno'),
+            'province': ('PROVINCE', 'cr63f_province'), 'municipality': ('MUNICIPALITY', 'cr63f_municipality'),
+            'registeredOwner': ('REGISTERED OWNER', 'cr63f_registeredowner'),
+            'authorizedRepresentative': ('AUTHORIZED REPRESENTATIVE', 'cr63f_authorizedrepresentative'),
+            'landArea': ('LAND AREA (SQM)', 'cr63f_landareasqm'), 'offerDate': ('OFFER DATE', 'cr63f_offerdate'),
+            'offerType': ('OFFER TYPE', 'cr63f_offertype'), 'offerLetterLink': ('OFFER LETTER LINK', 'cr63f_offerletterlink'),
+        },
         'team': {
             'employeeName': ('Employee Name', 'Name', 'Negotiator', 'Negotiator Name', 'LSA Name'),
             'team': ('Team', 'Team Name'),
@@ -1592,6 +1607,31 @@ class DataverseClient:
         return found
 
 
+    def get_negotiation_visit_history(self, index_numbers, table_logical=None):
+        """All-time dates for only the uploaded INDEX NOs; no property-area dependency."""
+        ent = table_logical or self.config.get('nego_records_table') or 'cr63f_batangasnegorecord'
+        if 'sourcing' in ent.lower() or 'productivity' in ent.lower():
+            raise ValueError('Choose a negotiation records table for offer visit history.')
+        info = self.get_entity_info(ent)
+        index = self._resolve(ent, 'INDEX NO', 'cr63f_indexno', 'cr63f_indexnumber')
+        date = self._resolve(ent, 'NEGO DATE', 'cr63f_negotiationdate', 'cr63f_negodate', 'NEGO DATE TEXT')
+        if not index or not date:
+            raise ValueError('The negotiation history table must have INDEX NO and NEGO DATE.')
+        values = sorted({str(v).strip() for v in index_numbers if str(v).strip()})
+        records = []
+        for start in range(0, len(values), 40):
+            filters = []
+            for value in values[start:start + 40]:
+                if index['type'] in NUMERIC_ATTRIBUTE_TYPES:
+                    literal = str(parse_numeric_value(value, index['type']))
+                else:
+                    literal = "'" + _escape_odata(value) + "'"
+                filters.append(f"{index['logical']} eq {literal}")
+            rows = self._get_all(info['entitySetName'], [index['logical'], date['logical']],
+                                 filter_str=' or '.join(filters))
+            records.extend({'INDEX NO': r.get(index['logical']), 'NEGO DATE': r.get(date['logical'])} for r in rows)
+        return records
+
     def get_records_for_area_indexes(self, mode: str, area_indexes: set[str] | list[str], table_logical: str | None = None) -> list[dict]:
         """Fetch all historical records for specific area indexes from Dataverse."""
         if not area_indexes:
@@ -2022,11 +2062,38 @@ class DataverseClient:
             'source': f"Dataverse: {logical_name}",
         }
 
+    def get_sourcing_name_history(self, logical_name: str) -> list[dict]:
+        """Narrow, read-only employee evidence for the selected sourcing table."""
+        if logical_name != 'cr63f_batangassourcingrecord':
+            raise ValueError('Historical employee matching is scoped to Batangas sourcing.')
+        info = self.get_entity_info(logical_name)
+        labels = {'LSA NAME': ['LSA NAME', 'LSA Representatives', 'cr63f_lsarepresentatives'],
+                  'REPORT DATE': ['REPORT DATE', 'cr63f_reportdate'],
+                  'AREA-INDEX': ['AREA INDEX', 'cr63f_areaindex'], 'GROUP': ['GROUP', 'cr63f_groupname']}
+        fields = {h: self._resolve(logical_name, *names) for h, names in labels.items()}
+        if any(not fields[h] for h in ('LSA NAME', 'REPORT DATE', 'AREA-INDEX')):
+            raise ValueError('Historical sourcer evidence is missing required columns.')
+        pk = info['primaryIdAttribute']
+        rows = self._get_all(info['entitySetName'], [pk] + [m['logical'] for m in fields.values() if m], formatted=True)
+        return [{'_record_id': r[pk], **{h: _formatted(r, m['logical']) if m else '' for h, m in fields.items()}} for r in rows]
+
     def load_arbitrary_reference_table(self, logical_name: str, kind: str) -> list[dict]:
         """Load ANY table into one of the app's reference roles (team, municipality, mapping, build, existing)."""
         info = self.get_entity_info(logical_name)
         entity_set = info['entitySetName']
         pk = info['primaryIdAttribute']
+
+        if kind == 'offer':
+            import offer_letter as ol
+            fields = {key: self._resolve(logical_name, label, ol.LOGICAL_FIELDS[key]) for key, label in ol.FIELDS}
+            missing = [key for key, meta in fields.items() if not meta]
+            if missing:
+                raise ValueError('OFFER LETTER table is missing fields: ' + ', '.join(missing))
+            rows = self._get_all(entity_set, [meta['logical'] for meta in fields.values()] + [pk], formatted=True)
+            return [{**{key: (format_date_to_mm_dd_yyyy(r.get(meta['logical'])) if key == 'offerDate'
+                             else r.get(meta['logical'], '') if key == 'landArea'
+                             else _formatted(r, meta['logical'])) for key, meta in fields.items()},
+                     '_record_id': _s(r.get(pk)), '_entity_logical': logical_name} for r in rows]
 
         if kind == 'team':
             name = self._resolve(logical_name, 'Employee Name', 'Name', 'Negotiator', 'Negotiator Name', 'LSA Name')
@@ -2095,7 +2162,6 @@ class DataverseClient:
             return [r for r in out if r['areaIndex']]
 
         if kind == 'existing':
-            from productivity_tool import format_date_to_mm_dd_yyyy
             area = self._resolve(logical_name, 'cr63f_areaindex', 'AREA-INDEX', 'Area Index', 'AreaIndex')
             rec_id = self._resolve(logical_name, 'cr63f_id', 'ID', 'Id', 'Record ID', 'ITEM #', 'ITEM NO')
             date_attr = self._resolve(

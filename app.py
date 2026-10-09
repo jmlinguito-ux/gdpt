@@ -108,6 +108,7 @@ class Api:
         self.rows: list[dict] = []          # parsed review rows (with IDs)
         self.calculated: list[dict] = []     # after Calculate
         self.productivity: list[dict] = []   # enriched productivity rows
+        self._historical_name_reference = None
         self.has_calculated = False
         # stage 5 (Publish productivity) gate: true only after stage 4
         # (Publish records) wrote/confirmed every calculated row into the
@@ -117,6 +118,8 @@ class Api:
         self.municipality_codes: list[dict] = []
         self.mapping_statuses: list[dict] = []
         self.build_rows: list[dict] = []
+        self.offer_rows: list[dict] = []
+        self._offer_history_cache = None
         self.use_current_build: bool = False
         self._pending_build_sync: dict | None = None  # staged Build->Dataverse upsert plan
         self._pending_ref_sync: dict | None = None    # staged team/municipality/mapping upsert plan
@@ -219,10 +222,11 @@ class Api:
                 'municipality': len(self.municipality_codes),
                 'mapping': len(self.mapping_statuses),
                 'build': len(self.build_rows),
+                'offer': len(getattr(self, 'offer_rows', [])) if self.mode == 'negotiation' else 0,
                 'existing': self.existing_count if self.existing_count else len(self.existing_records),
             },
             'refTablesLoading': getattr(self, 'ref_tables_loading', False),
-            'negotiatorOptions': pt.negotiator_options(self.teams, self.mode),
+            'negotiatorOptions': sorted(set(pt.negotiator_options(self.teams, self.mode)) | set((self._historical_name_reference or {}).get('historical_names', []) if self.mode == 'land-sourcing' else [])),
         }
 
     def save_ui_settings(self, new_settings: dict):
@@ -283,6 +287,7 @@ class Api:
         self.existing_area_set = set()
         self._dedup_records = []
         self._dedup_area_set = set()
+        self._offer_history_cache = None
         self.existing_count = 0
 
     def _reset_data(self):
@@ -399,7 +404,7 @@ class Api:
 
     def _autoload_references(self):
         for kind, path in list(self.remembered.items()):
-            if kind not in self._REF_ATTR:
+            if kind not in self.reference_kinds():
                 continue
             if kind == 'build':
                 continue  # Build comes from Dataverse (Sync/Fetch), never an auto-loaded file
@@ -617,6 +622,7 @@ class Api:
                 'municipality': _find_best('municipalitycode', 'municipality', 'municode'),
                 'mapping': _find_best('mappingstatus', 'mapping'),
                 'build': _find_best('batangasbuild', 'areaindexbuildinfo', 'build'),
+                **({'offer': _find_best('offerletter')} if self.mode == 'negotiation' else {}),
                 'existing': _find_best('batangassourcingrecord', 'sourcingrecord') if self.mode == 'land-sourcing' else _find_best('batangasnegorecord', 'negorecord'),
                 'productivity': _find_best('sourcingproductivity', 'productivity') if self.mode == 'land-sourcing' else _find_best('negoproductivity', 'productivity'),
             }
@@ -638,7 +644,8 @@ class Api:
         if not (self.dv_client and self.dv_client.signed_in()):
             return self._err('Connect to Dataverse first.')
 
-        kinds_to_load = selected_kinds if selected_kinds is not None else ['team', 'municipality', 'mapping', 'build', 'existing']
+        available = self.reference_kinds()
+        kinds_to_load = [k for k in (selected_kinds if selected_kinds is not None else available) if k in available]
 
         def load_one(kind):
             """Fetch one reference table. Returns (kind, label, rows) for the caller
@@ -658,6 +665,8 @@ class Api:
                 return kind, 'mappingstatus', self.dv_client.get_mapping_statuses(), None
             if kind == 'build':
                 return kind, 'batangasbuild', self.dv_client.get_build_rows(), None
+            if kind == 'offer':
+                return kind, 'cr63f_offerletter', self.dv_client.load_arbitrary_reference_table('cr63f_offerletter', 'offer'), None
             if kind == 'existing':
                 if self.rows:
                     start_date, end_date, area_indexes = pt.get_batch_work_week_bounds(self.rows, self.mode, self.municipality_codes)
@@ -699,6 +708,8 @@ class Api:
                             self._checker_history_scope = (self.mode, self.existing_area_set)
                         mapped = mappings.get(kind, '').strip() if mappings else ''
                         self.ref_sources[kind] = f"Dataverse: {mapped}" if mapped else 'Dataverse (live)'
+                        if kind == 'offer':
+                            self._invalidate_offer_calculations()
                         results[kind] = (label, len(data))
 
                 summary_parts = [f"{n} {k}" for k, (_, n) in results.items()]
@@ -714,7 +725,7 @@ class Api:
         """Load a single reference table from Dataverse."""
         if not (self.dv_client and self.dv_client.signed_in()):
             return self._err('Connect to Dataverse first.')
-        if kind not in self._REF_ATTR:
+        if kind not in self.reference_kinds():
             return self._err(f'Unknown reference table: {kind}')
 
         return self.fetch_dataverse_tables({kind: logical_name or ''}, [kind])
@@ -905,6 +916,8 @@ class Api:
             return self._err('POINTS is generated by productivity calculation and cannot be edited.')
         if is_productivity_scope and ({normalized_column, normalized_label} & {'BUILD', 'CR63FBUILD'}):
             return self._err('BUILD is derived from the Build reference table and cannot be edited.')
+        if {normalized_column, normalized_label} & {'OFFERLETTERACTION', 'CR63FOFFERLETTERACTION'}:
+            return self._err('OFFER LETTER ACTION is calculated and cannot be edited manually.')
         val = '' if value is None else str(value).strip()
         label = ed['labels'][ed['columns'].index(column)] if ed['labels'] else column
         field_type = (ed.get('types') or {}).get(column)
@@ -1020,8 +1033,45 @@ class Api:
     # -- per-source reference loading -------------------------------------
     _REF_ATTR = {
         'team': 'teams', 'municipality': 'municipality_codes', 'mapping': 'mapping_statuses',
-        'build': 'build_rows', 'existing': 'existing_records',
+        'build': 'build_rows', 'existing': 'existing_records', 'offer': 'offer_rows',
     }
+
+    def reference_kinds(self):
+        return [k for k in self._REF_ATTR if k != 'offer' or self.mode == 'negotiation']
+
+    def _offer_calculation_context(self, refresh=False):
+        if self.mode != 'negotiation':
+            return {}
+        import offer_letter as ol
+        indexes = tuple(sorted({ol.index_key(r) for r in self.rows} - {''}))
+        source = getattr(self, 'ref_sources', {}).get('existing', '')
+        table = source[len('Dataverse: '):] if source.startswith('Dataverse: ') else None
+        scope = (indexes, table)
+        cache = getattr(self, '_offer_history_cache', None)
+        if refresh or not cache or cache['scope'] != scope:
+            history, ready = [], False
+            if indexes and getattr(self, 'dv_client', None) and self.dv_client.signed_in():
+                try:
+                    history = self.dv_client.get_negotiation_visit_history(indexes, table)
+                    ready = True
+                except Exception:
+                    pass
+            else:
+                # File-based history is usable only if it carries INDEX NO.
+                history = [r for r in getattr(self, 'existing_records', []) if ol.index_key(r)]
+                existing = getattr(self, 'existing_records', [])
+                ready = bool(getattr(self, 'ref_sources', {}).get('existing')) and len(history) == len(existing)
+            self._offer_history_cache = {'scope': scope, 'rows': history, 'ready': ready}
+            cache = self._offer_history_cache
+        return {'offer_rows': getattr(self, 'offer_rows', []), 'offer_history': cache['rows'],
+                'offer_history_ready': cache['ready'],
+                'offer_reference_ready': bool(getattr(self, 'ref_sources', {}).get('offer'))}
+
+    def _invalidate_offer_calculations(self):
+        self.has_calculated = False
+        self.calculated = []
+        self.productivity = []
+        self.records_published_clean = False
 
 
 
@@ -1050,11 +1100,13 @@ class Api:
 
     def remove_reference(self, kind):
         try:
-            if kind not in self._REF_ATTR:
+            if kind not in self.reference_kinds():
                 return self._err(f'Unknown reference table: {kind}')
             active_path = self.remembered.get(kind)
             setattr(self, self._REF_ATTR[kind], [])
             self.ref_sources.pop(kind, None)
+            if kind == 'offer':
+                self._invalidate_offer_calculations()
             self.remembered.pop(kind, None)
             if active_path:
                 self.history[kind] = [p for p in self.history.get(kind, []) if p != active_path]
@@ -1072,6 +1124,8 @@ class Api:
             if kind in self._REF_ATTR:
                 setattr(self, self._REF_ATTR[kind], [])
                 self.ref_sources.pop(kind, None)
+                if kind == 'offer':
+                    self._invalidate_offer_calculations()
                 if kind == 'existing':
                     self.existing_name = ''
                     self.existing_area_set = set()
@@ -1083,7 +1137,7 @@ class Api:
 
     def clear_reference_history(self, kind):
         try:
-            if kind not in self._REF_ATTR:
+            if kind not in self.reference_kinds():
                 return self._err(f'Unknown reference table: {kind}')
             self.history[kind] = []
             self._write_settings()
@@ -1101,7 +1155,7 @@ class Api:
 
     def forget_reference_history_entry(self, kind, path):
         try:
-            if kind not in self._REF_ATTR:
+            if kind not in self.reference_kinds():
                 return self._err(f'Unknown reference table: {kind}')
             self.history[kind] = [p for p in self.history.get(kind, []) if p != path]
             self._write_settings()
@@ -1111,7 +1165,9 @@ class Api:
 
     def get_reference_rows(self, kind):
         try:
-            if kind not in self._REF_ATTR:
+            if kind == 'offer' and self.mode == 'land-sourcing':
+                return self._err('OFFER LETTER is available for negotiations only.')
+            if kind not in self.reference_kinds():
                 return self._err(f'Unknown reference table: {kind}')
             data = getattr(self, self._REF_ATTR[kind])
             # Existing Records comes from several fetch paths (bounded preview,
@@ -1128,6 +1184,10 @@ class Api:
             labels = [label for _, label in cols]
             keys = [key for key, _ in cols]
             rows = [[str(r.get(key, '') if r.get(key, '') is not None else '') for key, _ in cols] for r in data]
+            if kind == 'offer':
+                date_index = keys.index('offerDate')
+                for cells in rows:
+                    cells[date_index] = pt.format_date_to_mm_dd_yyyy(cells[date_index])
             return {'ok': True, 'title': pt.REFERENCE_LABELS.get(kind, kind), 'labels': labels, 'keys': keys,
                     'rows': rows, 'count': len(data), 'source': self.ref_sources.get(kind, ''), 'kind': kind}
         except Exception as exc:  # noqa: BLE001
@@ -1135,11 +1195,16 @@ class Api:
 
     def update_reference_cell(self, kind: str, row_index: int, key: str, value: str):
         try:
-            if kind not in self._REF_ATTR:
+            if kind not in self.reference_kinds():
                 return self._err(f'Unknown reference table: {kind}')
             data = getattr(self, self._REF_ATTR[kind])
             if 0 <= row_index < len(data):
                 val_clean = value.strip()
+                if kind == 'offer':
+                    import offer_letter as ol
+                    if key not in dict(ol.FIELDS):
+                        return self._err('Unknown OFFER LETTER column.')
+                    val_clean = ol.validate_cell(key, value)
                 data[row_index][key] = val_clean
                 synced = False
                 sync_msg = ''
@@ -1151,6 +1216,7 @@ class Api:
                 if not ent_logical:
                     defaults = {'team': 'cr63f_teamcomposition', 'municipality': 'cr63f_municipalitycode',
                                 'mapping': 'cr63f_mappingstatus', 'build': 'cr63f_batangasbuild',
+                                'offer': 'cr63f_offerletter',
                                 'existing': 'cr63f_batangasnegorecord' if self.mode != 'land-sourcing' else 'cr63f_batangassourcingrecord'}
                     ent_logical = defaults.get(kind, '')
 
@@ -1169,7 +1235,10 @@ class Api:
                         # edits update it live — so new rows sync instead of staying local.
                         cols = pt.REFERENCE_VIEW_COLUMNS.get(kind, [])
                         key_field = cols[0][0] if cols else ''
-                        if key_field and str(row.get(key_field, '') or '').strip():
+                        has_key = bool(str(row.get(key_field, '') or '').strip())
+                        if kind == 'offer':
+                            has_key = bool((row.get('areaIndex') or row.get('titleNo')) and row.get('offerDate') and row.get('offerType'))
+                        if has_key:
                             payload = {}
                             for k2, v2 in row.items():
                                 if k2.startswith('_') or not str(v2 or '').strip():
@@ -1187,10 +1256,13 @@ class Api:
                                 sync_msg = f'Local updated, Dataverse sync notice: {dv_exc}'
                         else:
                             key_label = cols[0][1] if cols else 'the first column'
-                            sync_msg = f'Saved locally — fill in {key_label} to sync this new row to Dataverse'
+                            required = 'AREA INDEX or TITLE NO, OFFER DATE, and OFFER TYPE' if kind == 'offer' else key_label
+                            sync_msg = f'Saved locally — fill in {required} to sync this new row to Dataverse'
                 elif not (self.dv_client and self.dv_client.signed_in()):
                     sync_msg = 'Saved locally (Dataverse not connected)'
 
+                if kind == 'offer':
+                    self._invalidate_offer_calculations()
                 return self._ok(row=data[row_index], synced=synced, msg=sync_msg)
             return self._err('Row index out of range.')
         except Exception as exc:  # noqa: BLE001
@@ -1199,16 +1271,21 @@ class Api:
 
     def add_reference_row(self, kind: str, row_data: dict | None = None):
         try:
-            if kind not in self._REF_ATTR:
+            if kind not in self.reference_kinds():
                 return self._err(f'Unknown reference table: {kind}')
             data = getattr(self, self._REF_ATTR[kind])
             cols = pt.REFERENCE_VIEW_COLUMNS[kind]
             new_row = {key: '' for key, _ in cols}
             if row_data:
                 new_row.update(row_data)
+            if kind == 'offer':
+                import offer_letter as ol
+                for key, _ in ol.FIELDS:
+                    new_row[key] = ol.validate_cell(key, new_row.get(key))
 
             defaults = {'team': 'cr63f_teamcomposition', 'municipality': 'cr63f_municipalitycode',
                         'mapping': 'cr63f_mappingstatus', 'build': 'cr63f_batangasbuild',
+                        'offer': 'cr63f_offerletter',
                         'existing': 'cr63f_batangasnegorecord' if self.mode != 'land-sourcing' else 'cr63f_batangassourcingrecord'}
             ent_logical = defaults.get(kind, '')
             if data and data[0].get('_entity_logical'):
@@ -1224,7 +1301,8 @@ class Api:
                         continue
                     dv_field = self.dv_client.resolve_field_name(ent_logical, kind, k)
                     payload[dv_field] = v
-                if payload:
+                ready = kind != 'offer' or bool((new_row.get('areaIndex') or new_row.get('titleNo')) and new_row.get('offerDate') and new_row.get('offerType'))
+                if payload and ready:
                     try:
                         new_guid = self.dv_client.create_record(ent_logical, payload)
                         if new_guid:
@@ -1235,13 +1313,15 @@ class Api:
                         sync_msg = f'Local added, Dataverse sync notice: {dv_exc}'
 
             data.insert(0, new_row)
+            if kind == 'offer':
+                self._invalidate_offer_calculations()
             return self._ok(count=len(data), synced=synced, msg=sync_msg)
         except Exception as exc:  # noqa: BLE001
             return self._err(exc)
 
     def delete_reference_row(self, kind: str, row_index: int):
         try:
-            if kind not in self._REF_ATTR:
+            if kind not in self.reference_kinds():
                 return self._err(f'Unknown reference table: {kind}')
             data = getattr(self, self._REF_ATTR[kind])
             if 0 <= row_index < len(data):
@@ -1259,6 +1339,8 @@ class Api:
                         sync_msg = f'Local deleted, Dataverse sync notice: {dv_exc}'
 
                 data.pop(row_index)
+                if kind == 'offer':
+                    self._invalidate_offer_calculations()
                 return self._ok(count=len(data), synced=synced, msg=sync_msg)
             return self._err('Row index out of range.')
         except Exception as exc:  # noqa: BLE001
@@ -1266,7 +1348,7 @@ class Api:
 
 
     def export_reference_table(self, kind: str, fmt: str = 'csv'):
-        if kind not in self._REF_ATTR:
+        if kind not in self.reference_kinds():
             return self._err(f'Unknown reference table: {kind}')
 
         def worker():
@@ -1308,7 +1390,7 @@ class Api:
 
     def upload_reference_file(self, kind: str):
         """Open file dialog to upload an Excel or CSV file and replace the reference table records."""
-        if kind not in self._REF_ATTR:
+        if kind not in self.reference_kinds():
             return self._err(f'Unknown reference table: {kind}')
 
         def worker():
@@ -1336,6 +1418,8 @@ class Api:
                 setattr(self, self._REF_ATTR[kind], data)
                 fname = os.path.basename(path)
                 self.ref_sources[kind] = f"File: {fname}"
+                if kind == 'offer':
+                    self._invalidate_offer_calculations()
                 self.remembered[kind] = path
                 self.history[kind] = self._mru_push(self.history.get(kind, []), path)
                 if kind == 'existing':
@@ -1882,7 +1966,8 @@ class Api:
                                                            self.build_rows, all_recs, all_areas,
                                                            ignore_build_work_week=self.use_current_build,
                                                            mode=self.mode,
-                                                           history_ready=history_ready)
+                                                           history_ready=history_ready,
+                                                           **self._offer_calculation_context(refresh=True))
                 self.has_calculated = True
                 self.records_published_clean = False  # records must be (re)published before stage 5
                 build_errs = pt.get_build_week_errors(self.calculated, self.build_rows, self.mode,
@@ -1894,6 +1979,9 @@ class Api:
                     msg = 'Review values calculated using current Build reference.'
                 else:
                     msg = 'Review values calculated.'
+                offer_issues = sum(bool(r.get('_offer_letter_issue')) for r in self.calculated)
+                if offer_issues:
+                    msg += f' {offer_issues} OFFER LETTER ACTION value(s) need attention; see the highlighted cells.'
                 self._done(msg, table=self._review_table(self.calculated), view='review', refresh=True)
             except Exception:  # noqa: BLE001
                 self._done(traceback.format_exc(), error=True)
@@ -1924,14 +2012,35 @@ class Api:
                     return
                 # NOTE: Build work-week mismatches do NOT block here — the UI warns
                 # and asks the user to confirm before calling generate.
+                offer_issues = [r.get('_offer_letter_issue') for r in self.calculated if r.get('_offer_letter_issue')]
+                if offer_issues:
+                    self._done(f'Fix {len(offer_issues)} OFFER LETTER ACTION issue(s) before generating productivity. {offer_issues[0]}',
+                               error=True, refresh=False)
+                    return
                 all_recs, _ = self._get_combined_existing()
                 productivity = pt.build_productivity_rows(self.calculated, self.teams, self.mapping_statuses,
                                                           all_recs, self.municipality_codes,
                                                           mode=self.mode,
                                                           history_ready=self._checker_history_ready())
-                self.productivity = pt.enrich_workspace_rows(productivity, self.teams)
+                historical_reference = None
+                if self.mode == 'land-sourcing':
+                    existing_table = self.settings.get('references', {}).get('existing') or ''
+                    if self.ref_sources.get('existing', '').startswith('Dataverse: '):
+                        existing_table = self.ref_sources['existing'].replace('Dataverse: ', '').strip()
+                    if not existing_table:
+                        existing_table = self.ui_settings.get('sourcing_record_table', '')
+                    if existing_table == 'cr63f_batangassourcingrecord':
+                        import historical_names as hn
+                        history = self.dv_client.get_sourcing_name_history(existing_table) if self.dv_client and self.dv_client.signed_in() else []
+                        historical_reference = hn.build_reference(history + self.calculated, self.teams)
+                self._historical_name_reference = historical_reference
+                self.productivity = pt.enrich_workspace_rows(productivity, self.teams, historical_reference)
+                issues = self._refresh_productivity_calculations()
                 self.records_published_clean = False  # productivity changed; re-publish records to unlock stage 5
-                self._done(f'Generated {len(self.productivity)} productivity rows.',
+                message = f'Generated {len(self.productivity)} productivity rows; POINTS and LO metrics use these Productivity visits.'
+                if issues:
+                    message += f" {len({i['id'] for i in issues})} row(s) need calculation review before publishing."
+                self._done(message,
                            table=self._productivity_table(), view='productivity', refresh=True)
             except Exception:  # noqa: BLE001
                 self._done(traceback.format_exc(), error=True)
@@ -1947,16 +2056,36 @@ class Api:
             defaults = lookup.get((name or '').strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
             row = self.productivity[index]
             row['MATCHED NEGOTIATOR NAME'] = name
+            self._resolve_historical_workspace_name(row, name)
+            defaults = lookup.get(str(row.get('MATCHED NEGOTIATOR NAME') or '').strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
             row['CORRECT TEAM'] = defaults['correctTeam']
             row['TEAM MATCH'] = pt.get_match_status(pt.normalize_team(row.get('TEAM')), defaults['correctTeam'])
             row['CORRECT GROUP'] = defaults['correctGroup']
             row['GROUP MATCH'] = pt.get_match_status(pt.normalize_group(row.get('GROUP')), defaults['correctGroup'])
-            return {'ok': True, 'row': self._productivity_row_cells(row)}
+            pt.apply_team_name_usability(row, pt.team_name_set(self.teams))
+            self._refresh_productivity_calculations()
+            return {'ok': True, 'row': self._productivity_row_cells(row), 'table': self._productivity_table()}
         except Exception as exc:  # noqa: BLE001
             return self._err(exc)
 
+    def _resolve_historical_workspace_name(self, row, name):
+        reference = getattr(self, '_historical_name_reference', None)
+        if reference is not None and row.get('_historical_sourcer_name'):
+            import historical_names as hn
+            row['_historical_name_resolution'] = hn.resolve(name, reference)
+            row['MATCHED NEGOTIATOR NAME'] = row['_historical_name_resolution']['name']
+
+    def _refresh_productivity_calculations(self):
+        from productivity_workspace import refresh
+        sources = getattr(self, 'calculated', [])
+        history = self._get_combined_existing()[0] if sources else []
+        return refresh(self.productivity, sources, history, self.teams, self.mode,
+                       self._checker_history_ready() if sources else True)
+
     def update_review_cell(self, row_index: int, key: str, value: str):
         try:
+            if str(key).strip().upper() == 'OFFER LETTER ACTION':
+                return self._err('OFFER LETTER ACTION is calculated and cannot be edited manually.')
             if str(key).upper() == 'CHECKER':
                 return self._err('CHECKER is an auto-derived column and cannot be edited manually.')
             row_index = int(row_index)
@@ -1990,7 +2119,8 @@ class Api:
                                                            self.build_rows, all_recs, all_areas,
                                                            ignore_build_work_week=self.use_current_build,
                                                            mode=self.mode,
-                                                           history_ready=history_ready)
+                                                           history_ready=history_ready,
+                                                           **self._offer_calculation_context())
                 updated_row = self.calculated[row_index]
             else:
                 updated_row = self.rows[row_index]
@@ -2018,7 +2148,8 @@ class Api:
                 self.calculated = pt.calculate_review_rows(self.rows, self.municipality_codes, self.mapping_statuses,
                                                            self.build_rows, all_recs, all_areas,
                                                            ignore_build_work_week=self.use_current_build,
-                                                           mode=self.mode)
+                                                           mode=self.mode,
+                                                           **self._offer_calculation_context())
             return {
                 'ok': True,
                 'state': self.state(),
@@ -2053,39 +2184,48 @@ class Api:
 
     # -- publish helpers ---------------------------------------------------
     def _row_keys(self, row: dict):
-        """The duplicate identity of a row: AREA-INDEX + DATE + NEGOTIATOR only.
+        """The duplicate identity of a row (see pt.publish_duplicate_key):
+        AREA INDEX + DATE + LO + DATA USABILITY + CHECKER + raw negotiator/sourcer.
 
-        Per project rule, duplicates are compared ONLY on this composite — never on
-        ID or UNIQUE ID. The negotiator is the MATCHED negotiator/sourcer, falling
-        back to the raw name when no matched value is present (kept symmetric with
-        get_existing_keys on the Dataverse side). Returns (area_key, label).
+        This mirrors the Dataverse NEGO ID / SOURCING ID formula plus the person, so
+        two different reports (different LO / checker) on the same day are both kept,
+        while the same report published twice is caught even if its MATCHED name was
+        blank or changed between runs. Kept symmetric with dataverse._existing_key_index.
+        Returns (key, label).
         """
         row_area = str(row.get('AREA-INDEX', '') or row.get('AREA INDEX', '') or '').strip().upper()
         row_date = str(row.get('NEGO DATE', '') or row.get('SOURCING DATE', '')
                        or row.get('REPORT DATE', '') or '').strip()
-        row_neg = str(row.get('MATCHED NEGOTIATOR NAME', '') or row.get('MATCHED SOURCER', '')
-                      or row.get('MATCHED SOURCER NAME', '')
-                      or row.get('NEGOTIATOR NAME', '') or row.get('SOURCER NAME', '')
+        row_neg = str(row.get('NEGOTIATOR NAME', '') or row.get('SOURCER NAME', '')
                       or row.get('SOURCER', '') or row.get('LSA NAME', '') or '').strip().upper()
-        area_key = ''
-        if row_area and row_date:
-            norm_d = (pt.format_date_to_mm_dd_yyyy(row_date) or row_date).upper()
-            area_key = f"{row_area}___{norm_d}___{row_neg}"
+        row_lo = pt.get_lo_occurrence_name(row)
+        row_use = row.get('DATA USABILITY', '') or ''
+        row_chk = row.get('CHECKER', '') or row.get('DUPLICATE CHECKER', '') or ''
+        key = pt.publish_duplicate_key(row_area, row_date, row_lo, row_use, row_chk, row_neg)
         label = ((row_area or '') + ((' / ' + row_date) if row_date else '')
+                 + ((' / ' + row_lo) if row_lo else '')
                  + ((' / ' + row_neg) if row_neg else ''))
-        return area_key, label
+        return key, label
 
-    def _partition_rows(self, rows, existing_keys, override=False, key_id_map=None):
+    # Person columns that must hold exactly ONE person on a productivity row.
+    PERSON_NAME_COLUMNS = ('NEGOTIATOR NAME', 'MATCHED NEGOTIATOR NAME', 'MATCHED NEGOTIATOR',
+                           'SOURCER NAME', 'SOURCER', 'MATCHED SOURCER', 'MATCHED SOURCER NAME',
+                           'LSA NAME', 'MATCHED LSA NAME')
+
+    def _partition_rows(self, rows, existing_keys, override=False, key_id_map=None, stage='review'):
         """Split rows into (writable, duplicates, updatable) and collect hard errors.
 
-        - A duplicate is a row whose ID / UNIQUE ID / AREA-INDEX+date+negotiator
-          already exists in Dataverse, or repeats earlier in this same batch.
+        - A duplicate is a row whose key (AREA + DATE + LO + DATA USABILITY +
+          CHECKER + raw negotiator/sourcer) already exists in Dataverse, or
+          repeats an earlier row in this same batch.
         - When `override` is on, a duplicate that matches an EXISTING Dataverse
           record (any of the three keys) becomes 'updatable' — it will PATCH that
           record instead of being skipped. In-batch repeats are still skipped
           (there is no stored record to update yet). `key_id_map` maps a matched
           key to the target record id.
-        - A hard error is a bad date value. Hard errors block the whole publish.
+        - A hard error is a bad date value, or (productivity stage only) a person
+          column holding more than one name ("A / B") or an N/A placeholder.
+          Hard errors block the whole publish.
         Returns (writable[(idx,row,label)], duplicates[dict], updatable[(idx,row,label,record_id)], hard_errors[dict]).
         """
         writable, duplicates, updatable, hard_errors = [], [], [], []
@@ -2095,29 +2235,48 @@ class Api:
             breakdown[cat] = breakdown.get(cat, 0) + 1
 
         key_id_map = key_id_map or {}
+        seen_batch_keys: set[str] = set()
 
         for idx, row in enumerate(rows):
             row_num = idx + 1
             area_key, label = self._row_keys(row)
-            # Duplicate identity against Dataverse is AREA-INDEX + DATE + NEGOTIATOR (matched/
-            # sourcer). In-batch rows with the same key are all published (with their
-            # Mapping Status / Data Usability tags already set by Stage 2 Review).
+            # Duplicate identity: AREA + DATE + LO + DATA USABILITY + CHECKER + raw name.
+            # A repeat of an earlier row in this SAME batch is skipped (it used to be
+            # published, creating duplicate rows in Dataverse).
+            in_batch_repeat = bool(area_key and area_key in seen_batch_keys)
+            if area_key:
+                seen_batch_keys.add(area_key)
             in_existing = bool(area_key and area_key in existing_keys)
             existing_id = key_id_map.get(area_key) if in_existing else None
 
             # hard errors: invalid date cells (these must be fixed, never auto-skipped)
             bad = []
+            if self.mode == 'negotiation' and not row.get('OFFER LETTER ACTION'):
+                bad.append(row.get('_offer_letter_issue') or 'Calculate OFFER LETTER ACTION with valid references and negotiation history before publishing.')
             for k, v in row.items():
                 if pt.is_date_column(k):
                     val = str(v or '').strip()
                     reason = pt.date_cell_error(k, val)
                     if reason:
                         bad.append(f"{k} = '{val}' ({reason})")
+            if stage != 'review':
+                bad.extend(row.get('_calculation_issues') or [])
+                # One productivity row = one person. A "/" means names were not split
+                # (each would wrongly get the whole POINT); N/A is not a person.
+                for col in self.PERSON_NAME_COLUMNS:
+                    if col in row:
+                        issue = pt.name_cell_issue(row.get(col))
+                        if issue:
+                            bad.append(f"{col} = '{str(row.get(col)).strip()}' {issue}")
             if bad:
                 hard_errors.append({'row': row_num, 'label': label, 'issues': bad})
                 continue
 
-            if in_existing:
+            if in_batch_repeat:
+                duplicates.append({'row': row_num, 'label': label, 'reason': label,
+                                   'category': 'in-batch'})
+                bump('skip:in-batch')
+            elif in_existing:
                 if override and existing_id:
                     updatable.append((idx, row, label, existing_id))
                     bump('overwrite:composite')
@@ -2138,6 +2297,8 @@ class Api:
         try:
             if not (self.dv_client and self.dv_client.signed_in()):
                 return self._err('Please connect to Dataverse first.')
+            if self.mode == 'negotiation' and not self.has_calculated:
+                return self._err('Click Calculate to derive OFFER LETTER ACTION before publishing.')
             target = (target_table or '').strip()
             if not target:
                 return self._err('Please select a target Dataverse table.')
@@ -2156,7 +2317,7 @@ class Api:
                 key_id_map = None
             self._existing_keys_cache = {'target': target, 'keys': existing_keys,
                                          'id_map': key_id_map, 'override': override, 'ts': time.time()}
-            writable, duplicates, updatable, hard_errors, breakdown = self._partition_rows(rows, existing_keys, override, key_id_map)
+            writable, duplicates, updatable, hard_errors, breakdown = self._partition_rows(rows, existing_keys, override, key_id_map, workspace_mode)
             build_errs = pt.get_build_week_errors(rows, self.build_rows, self.mode) if workspace_mode == 'review' else []
             return {
                 'ok': True,
@@ -2191,6 +2352,8 @@ class Api:
         `override` is on — then duplicates that match an existing Dataverse record
         are PATCHed in place instead. Hard errors abort before any write.
         """
+        if self.mode == 'negotiation' and not self.has_calculated:
+            return {'ok': False, 'error': 'Click Calculate to derive OFFER LETTER ACTION before publishing.'}
         rows = self._rows_for_stage(workspace_mode)
         if not rows:
             return {'ok': False, 'error': 'No records to publish.'}
@@ -2214,9 +2377,9 @@ class Api:
         else:
             existing_keys = self.dv_client.get_existing_keys(target)
             key_id_map = None
-        writable, duplicates, updatable, hard_errors, _breakdown = self._partition_rows(rows, existing_keys, override, key_id_map)
+        writable, duplicates, updatable, hard_errors, _breakdown = self._partition_rows(rows, existing_keys, override, key_id_map, workspace_mode)
         if hard_errors:
-            return {'ok': False, 'error': f'{len(hard_errors)} record(s) have invalid dates. Fix them before publishing.',
+            return {'ok': False, 'error': f'{len(hard_errors)} record(s) have validation errors. Fix them before publishing.',
                     'hard_errors': hard_errors}
         # NOTE: Build work-week mismatches do NOT block the publish — the UI warns
         # and asks the user to confirm before calling publish.
@@ -2717,6 +2880,8 @@ class Api:
             for h in headers:
                 if h == 'CHECKER' and not getattr(self, 'has_calculated', False):
                     val = pt.get_checker(row, rows, all_recs, history_ready=history_ready, mode=self.mode)
+                elif h == 'OFFER LETTER ACTION' and not getattr(self, 'has_calculated', False):
+                    val = ''
                 else:
                     val = row.get(h, '') if row.get(h, '') is not None else ''
                 row_cells.append(str(val))
@@ -2726,6 +2891,7 @@ class Api:
         build_errors = pt.get_build_week_errors(rows, getattr(self, 'build_rows', []), self.mode,
                                                 ignore_work_week=getattr(self, 'use_current_build', False)) if getattr(self, 'has_calculated', False) else []
         return {'headers': headers, 'rows': body, 'meta': meta, 'buildErrors': build_errors,
+                'offerErrors': {i: r['_offer_letter_issue'] for i, r in enumerate(rows) if r.get('_offer_letter_issue')},
                 'useCurrentBuild': getattr(self, 'use_current_build', False)}
 
 
@@ -2741,7 +2907,8 @@ class Api:
         if 'BUILD' in meta:
             meta['BUILD'] = {'type': 'text'}
         return {'columns': columns, 'labels': labels, 'rows': rows,
-                'matchedIndex': editable_index, 'matchColumns': match_cols, 'meta': meta}
+                'matchedIndex': editable_index, 'matchColumns': match_cols, 'meta': meta,
+                'calculationErrors': {i: r['_calculation_issues'] for i, r in enumerate(self.productivity) if r.get('_calculation_issues')}}
 
     def _productivity_row_cells(self, row):
         columns = pt.get_output_columns(self.mode)
@@ -2749,10 +2916,14 @@ class Api:
 
     def update_productivity_cell(self, row_index: int, key: str, value: str):
         try:
+            if str(key).strip().upper() == 'OFFER LETTER ACTION':
+                return self._err('OFFER LETTER ACTION is calculated and cannot be edited manually.')
             if str(key).upper() == 'CHECKER':
                 return self._err('CHECKER is an auto-derived column and cannot be edited manually.')
             if str(key).strip().upper() == 'POINTS':
                 return self._err('POINTS is generated by productivity calculation and cannot be edited.')
+            if str(key).strip().upper().startswith(('LO OCCURRENCE ', 'LO POINTS ', 'LO COUNT ')):
+                return self._err('LO metrics are calculated from Productivity visits and cannot be edited manually.')
             if str(key).strip().upper() == 'BUILD':
                 return self._err('BUILD is derived from the Build reference table and cannot be edited.')
             row_index = int(row_index)
@@ -2765,6 +2936,7 @@ class Api:
 
             # If matched negotiator was edited, update correct team, correct group, team match, group match
             if key in ('MATCHED NEGOTIATOR NAME', 'MATCHED SOURCER', 'NEGOTIATOR NAME', 'LSA NAME'):
+                self._resolve_historical_workspace_name(row, val_clean)
                 lookup = pt.build_team_lookup(self.teams)
                 matched_name = row.get('MATCHED NEGOTIATOR NAME') or row.get('NEGOTIATOR NAME') or row.get('LSA NAME') or ''
                 defaults = lookup.get(matched_name.strip().lower(), {'correctTeam': 'TEAM 0', 'correctGroup': 'GROUP 0'})
@@ -2772,6 +2944,14 @@ class Api:
                 row['TEAM MATCH'] = pt.get_match_status(pt.normalize_team(row.get('TEAM')), defaults['correctTeam'])
                 row['CORRECT GROUP'] = defaults['correctGroup']
                 row['GROUP MATCH'] = pt.get_match_status(pt.normalize_group(row.get('GROUP')), defaults['correctGroup'])
+                # Not in TEAM COMPOSITION -> INVALID; fixing the name restores it.
+                pt.apply_team_name_usability(row, pt.team_name_set(self.teams))
+                self._refresh_productivity_calculations()
+
+            elif key in ('DATA USABILITY', 'DATA-USABILITY'):
+                row['_base_data_usability'] = val_clean
+                pt.apply_team_name_usability(row, pt.team_name_set(self.teams))
+                self._refresh_productivity_calculations()
 
             elif key == 'TEAM':
                 val_clean = pt.normalize_team(val_clean)
@@ -2792,11 +2972,15 @@ class Api:
             elif key in ('NEGO DATE', 'REPORT DATE', 'SOURCING DATE'):
                 row['WORK WEEK'] = pt.get_work_week(val_clean)
 
+            if key in ('AREA INDEX', 'NEGO DATE', 'REPORT DATE', 'SOURCING DATE', 'LO'):
+                self._refresh_productivity_calculations()
+
             return {
                 'ok': True,
                 'state': self.state(),
                 'table': self._productivity_table(),
                 'row': self._productivity_row_cells(row),
+                'table': self._productivity_table(),
                 'msg': f'Updated {key}.'
             }
         except Exception as exc:  # noqa: BLE001
@@ -2808,6 +2992,7 @@ class Api:
             if row_index < 0 or row_index >= len(self.productivity):
                 return self._err('Row index out of range.')
             self.productivity.pop(row_index)
+            self._refresh_productivity_calculations()
             return {
                 'ok': True,
                 'state': self.state(),
