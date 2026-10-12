@@ -59,7 +59,8 @@ BATANGAS_NEGO_RECORD_COLUMNS = [
     'WITH OVERLAP ISSUE', 'LANDOWNER/AIF VERIFICATION', 'VERIFICATION OF HEIRS/AIF OF THE DECEASED RO/S',
     'HEIRS/AIF BASED ABROAD', 'NO NEXT OF KIN TO THE RO', 'AWAITING DECISION FROM THE LO', 'XCOORD', 'YCOORD',
     'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)',
-    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'OFFER LETTER ACTION',
+    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'WORK WEEK',
+    'OFFER LETTER ACTION',
 ]
 
 LAND_SOURCING_RECORD_COLUMNS = [
@@ -68,10 +69,10 @@ LAND_SOURCING_RECORD_COLUMNS = [
     'PROPERTY IDENTIFICATION NO (PIN)', 'REGISTERED OWNER', 'AUTHORIZED REPRESENTATIVE', 'TITLE TYPE', 'TITLE NO',
     'LOT AREA (SQM)', 'CLASSIFICATION', 'CLASS', 'INDICATIVE PRICE SALE', 'PAYMENT TERMS', 'NET OR GROSS',
     'INDICATIVE PRICE LEASE', 'CONTRACT TERMS (LEASE)', 'ESCALATION', 'XCOORD', 'YCOORD', 'MAPPING STATUS',
-    'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR',
+    'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'WORK WEEK',
 ]
 
-DERIVED_TEMPLATE_COLUMNS = {'ID', 'MAPPING STATUS', 'MUNI CODE', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'LO', 'OFFER LETTER ACTION'}
+DERIVED_TEMPLATE_COLUMNS = {'ID', 'MAPPING STATUS', 'MUNI CODE', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'WORK WEEK', 'LO', 'OFFER LETTER ACTION'}
 OPTIONAL_UPLOAD_COLUMNS = {'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)', 'LO'}
 # Derived review columns that calculate_review_rows recomputes — a manual edit to
 # one of these is remembered in row['_overrides'] so re-calculating keeps it.
@@ -994,6 +995,13 @@ def get_year_from_row_date(row: dict) -> str:
     value = row.get('NEGO DATE') or row.get('REPORT DATE') or ''
     d = _js_date_from_mm_dd_yyyy(value)
     return '' if d is None else str(d.year)
+
+
+def get_work_week_from_row_date(row: dict) -> str:
+    """Tue-Mon YYYY-WW work week of a record's NEGO DATE / REPORT DATE ('' if none)."""
+    value = row.get('NEGO DATE') or row.get('REPORT DATE') or ''
+    ww = get_work_week(format_date_to_mm_dd_yyyy(value)) if value else ''
+    return '' if ww == 'Unassigned' else ww
 
 
 def get_lot_area_ha(value: str) -> str:
@@ -2426,6 +2434,7 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
             'DATA USABILITY': derived_du,
             'CHECKER': get_checker(row, area_calculated, existing_records, history_ready=history_ready, mode=mode),
             'YEAR': get_year_from_row_date(row),
+            'WORK WEEK': get_work_week_from_row_date(row),
             'LOT AREA (HA)': get_lot_area_ha(row.get('LOT AREA (SQM)', '') or ''),
         }
         # Preserve the user's manual selections on derived columns (BUILD, DATA
