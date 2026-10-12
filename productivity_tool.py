@@ -655,34 +655,23 @@ def _js_date_from_mm_dd_yyyy(value: str):
 
 
 def get_work_week_info(d: datetime) -> tuple[str, datetime, datetime]:
-    """Calculate Wednesday-to-Tuesday work week (WW-01 to WW-52/53) and its start/end dates.
+    """Tuesday-to-Monday work week as 'YYYY-WW', plus its start (Tue) and end (Mon).
 
-    The Wednesday-to-Tuesday cycle that contains Jan 1 of a year is WW-01 for that year.
-    For 2026, WW-01 started on 12/31/2025 (Wed) and ran to 01/06/2026 (Tue).
+    The Tuesday-to-Monday week that contains Jan 1 is WW-01, and a week belongs
+    to the year of its closing Monday. E.g. 12/30/2025 (Tue) - 01/05/2026 (Mon)
+    is 2026-01; 12/23/2025 - 12/29/2025 is 2025-52.
     """
-    w = d.weekday()  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
-    days_since_wed = (w - 2) if w >= 2 else (w + 5)
-    wed = d - timedelta(days=days_since_wed)
-    tue = wed + timedelta(days=6)
+    d = datetime(d.year, d.month, d.day)
+    days_since_tue = (d.weekday() - 1) % 7  # weekday(): 0=Mon, 1=Tue ... 6=Sun
+    start = d - timedelta(days=days_since_tue)
+    end = start + timedelta(days=6)
 
-    mid = wed + timedelta(days=3)  # Saturday midpoint determines the primary year
-    y = mid.year
-
+    y = end.year
     jan1 = datetime(y, 1, 1)
-    w_jan1 = jan1.weekday()
-    days_to_wed = (w_jan1 - 2) if w_jan1 >= 2 else (w_jan1 + 5)
-    ww1_wed = jan1 - timedelta(days=days_to_wed)
+    ww1_start = jan1 - timedelta(days=(jan1.weekday() - 1) % 7)
+    week_num = (start - ww1_start).days // 7 + 1
 
-    week_num = int((wed - ww1_wed).days // 7) + 1
-    if week_num < 1:
-        y_prev = y - 1
-        jan1_prev = datetime(y_prev, 1, 1)
-        w_prev = jan1_prev.weekday()
-        days_to_wed_prev = (w_prev - 2) if w_prev >= 2 else (w_prev + 5)
-        ww1_wed_prev = jan1_prev - timedelta(days=days_to_wed_prev)
-        week_num = int((wed - ww1_wed_prev).days // 7) + 1
-
-    return f"WW-{week_num:02d}", wed, tue
+    return f"{y}-{week_num:02d}", start, end
 
 
 def get_work_week(date_value: str) -> str:
@@ -694,7 +683,7 @@ def get_work_week(date_value: str) -> str:
 
 
 def work_weeks_in_range(start_str, end_str) -> list[str]:
-    """The distinct Wednesday-to-Tuesday work weeks (WW-NN) that the date range
+    """The distinct Tuesday-to-Monday work weeks (YYYY-WW) that the date range
     covers, inclusive, newest first. Accepts YYYY-MM-DD or MM/DD/YYYY."""
     def _pd(s):
         s = str(s or '').strip()
@@ -712,7 +701,7 @@ def work_weeks_in_range(start_str, end_str) -> list[str]:
     if d0 > d1:
         d0, d1 = d1, d0
     labels, seen = [], set()
-    _, wed, _ = get_work_week_info(d0)  # start at the Wednesday of d0's work week
+    _, wed, _ = get_work_week_info(d0)  # start at the Tuesday of d0's work week
     cur = wed
     while cur <= d1:
         label, _, _ = get_work_week_info(cur)
@@ -725,13 +714,24 @@ def work_weeks_in_range(start_str, end_str) -> list[str]:
 
 
 def normalize_work_week(val) -> int | None:
-    """Parse a Work Week value ('WW-36', 'WW36', 'ww 36', '36', 36) into its week
-    number 1..53, or None if it can't be read."""
+    """Parse a Work Week value into its week number 1..53, or None if it can't be read.
+
+    Accepts:
+    - New YYYY-WW format: '2026-35'
+    - Legacy WW- format:  'WW-36', 'WW36', 'ww 36'
+    - Plain number:       '36', 36
+    """
     if val is None:
         return None
     s = str(val).strip()
     if not s:
         return None
+    # YYYY-WW format: extract the week part after the dash (last 1-2 digits)
+    m_yyyy = re.match(r'^\d{4}-(\d{1,2})$', s)
+    if m_yyyy:
+        n = int(m_yyyy.group(1))
+        return n if 1 <= n <= 53 else None
+    # Legacy WW- / plain number
     m = re.search(r'(\d{1,2})', s)
     if not m:
         return None
@@ -739,8 +739,22 @@ def normalize_work_week(val) -> int | None:
     return n if 1 <= n <= 53 else None
 
 
+def canonical_work_week(stored, date_value: str | None) -> str:
+    """The record's work week in YYYY-WW form.
+
+    Prefers the date (so legacy stored values like '35' or 'WW-35' still line up
+    with newly computed '2026-35'); falls back to the stored value only when
+    there is no usable date.
+    """
+    if date_value:
+        ww = get_work_week(date_value)
+        if ww != 'Unassigned':
+            return ww
+    return str(stored or '').strip()
+
+
 def iso_work_week_num(date_value: str) -> int | None:
-    """Work-week number (1..53) for a MM/DD/YYYY date using the Wed-Tue corporate work week."""
+    """Work-week number (1..53) for a MM/DD/YYYY date using the Tue-Mon corporate work week."""
     if not date_value:
         return None
     ww_str = get_work_week(date_value)
@@ -785,23 +799,31 @@ def get_build_week_errors(rows: list[dict], build_rows: list[dict], mode: str = 
         date_ww = iso_work_week_num(date_val) if date_val else None
         if date_ww is None:
             continue
+        date_ww_label = get_work_week(date_val) if date_val else f'WW-{date_ww:02d}'
         b = lut.get(area.lower())
         if not b or not str(b.get('build', '') or '').strip():
             continue  # no Build for this area index is OK (defaults to BALANCE) — do not block
         prev_ww = date_ww - 1 if date_ww > 1 else date_ww
-        need = f"WW-{date_ww:02d} or WW-{prev_ww:02d}"
+        # Derive the prev label: if date_ww is 1, prev is the same week (no wrap needed for display)
+        d_obj = _js_date_from_mm_dd_yyyy(date_val)
+        if d_obj and date_ww > 1:
+            prev_ww_label, _, _ = get_work_week_info(d_obj - timedelta(days=7))
+        else:
+            prev_ww_label = date_ww_label
+        need = f"{date_ww_label} or {prev_ww_label}"
         build_ww = normalize_work_week(b.get('workWeek'))
         if build_ww is None:
             errors.append({'row': index + 1, 'area': area,
-                           'reason': f"{area}: Build has no Work Week (record is WW-{date_ww:02d}, so its Build should be {need})"})
+                           'reason': f"{area}: Build has no Work Week (record is {date_ww_label}, so its Build should be {need})"})
         elif build_ww not in (date_ww, date_ww - 1):
+            build_ww_label = b.get('workWeek') or f'WW-{build_ww:02d}'
             errors.append({'row': index + 1, 'area': area,
-                           'reason': f"{area}: record is WW-{date_ww:02d} but its Build is WW-{build_ww:02d} (Build should be {need})"})
+                           'reason': f"{area}: record is {date_ww_label} but its Build is {build_ww_label} (Build should be {need})"})
     return errors
 
 
 def get_batch_work_week_bounds(rows: list[dict], mode: str, municipality_codes: list[dict] | None = None) -> tuple[str, str, set[str]]:
-    """Determine (min_wednesday, max_tuesday) in YYYY-MM-DD and set of AREA-INDEXes from rows."""
+    """Determine (first week start Tue, last week end Mon) in YYYY-MM-DD and set of AREA-INDEXes from rows."""
     dates = []
     area_indexes = set()
     date_key = 'REPORT DATE' if mode == 'land-sourcing' else 'NEGO DATE'
@@ -1213,7 +1235,7 @@ def get_nego_distinction(row: dict, rows: list[dict], existing_records: list[dic
         for it in existing_records:
             ai = (it.get('aREAINDEX') or it.get('AREA-INDEX') or it.get('AREA INDEX') or '').strip().lower()
             d = get_normalized_record_date(it)
-            ww = str(it.get('WORK WEEK', '') or '') or (get_work_week(d) if d else '')
+            ww = canonical_work_week(it.get('WORK WEEK'), d)
             if ai == area_index and ww == work_week:
                 same_week_existing.append(it)
 
@@ -1266,7 +1288,7 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
 
         r_lo = get_lo_occurrence_name(r)
         r_lo_key = r_lo.strip().lower()
-        r_ww = r.get('workWeek') or r.get('WORK WEEK') or get_work_week(r_date)
+        r_ww = canonical_work_week(r.get('workWeek') or r.get('WORK WEEK'), r_date)
         if r_ww and r_ww != 'Unassigned' and r_lo_key:
             existing_lo_ww_counts[(r_ww, r_lo_key)] += 1
 
@@ -1351,7 +1373,7 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
     for r in (existing_records or []):
         ai = (r.get('aREAINDEX') or r.get('AREA-INDEX') or r.get('AREA INDEX') or '').strip().lower()
         d = get_normalized_record_date(r)
-        ww = str(r.get('WORK WEEK', '') or '') or (get_work_week(d) if d else '')
+        ww = canonical_work_week(r.get('WORK WEEK'), d)
         if ai:
             existing_by_area_ww[(ai, ww)].append(r)
 
@@ -2177,7 +2199,17 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
             return {'type': 'choice', 'choices': ['DISTINCT', 'RENEGO', 'DISTINCT MULTIPLE', 'RENEGO MULTIPLE', 'DUPLICATE']}
 
     if col_upper == 'WORK WEEK':
-        return {'type': 'choice', 'choices': [f'WW-{i:02d}' for i in range(1, 54)]}
+        # YYYY-WW choices for the current and previous work-week years, newest first.
+        _, cur_wed, _ = get_work_week_info(datetime.now())
+        labels, seen = [], set()
+        d = cur_wed
+        while len(labels) < 106:  # ~two years of Tue-Mon weeks
+            label, _, _ = get_work_week_info(d)
+            if label not in seen:
+                seen.add(label)
+                labels.append(label)
+            d -= timedelta(days=7)
+        return {'type': 'choice', 'choices': labels}
 
     if col_upper == 'BUILD':
         choices = []
