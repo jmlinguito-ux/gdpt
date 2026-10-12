@@ -34,6 +34,8 @@ from productivity_tool import (
     excel_serial_to_date_str,
     date_to_excel_serial,
     normalize_work_week as pt_normalize_work_week,
+    format_date_to_mm_dd_yyyy as pt_format_date,
+    get_work_week as pt_get_work_week,
 )
 
 
@@ -792,7 +794,37 @@ class DataverseClient:
                     date_attrs.append(logical_name)
 
         return {'info': info, 'entity_set': entity_set, 'pk': pk,
-                'col_map': col_map, 'date_attrs': date_attrs, 'date_text_attrs': date_text_attrs}
+                'col_map': col_map, 'date_attrs': date_attrs, 'date_text_attrs': date_text_attrs,
+                'work_week': self._work_week_columns(entity_logical)}
+
+    def _work_week_columns(self, entity_logical: str) -> tuple[str, str] | None:
+        """(Work Week column, date column it follows) when the table keeps a
+        writable Work Week text column; None otherwise.
+
+        Negotiation tables follow NEGO DATE, sourcing productivity follows
+        SOURCING DATE and sourcing records follow REPORT DATE.
+        """
+        ww = self._resolve(entity_logical, 'WORK WEEK', 'cr63f_workweek')
+        if not ww or ww.get('type') != 'String' or ww.get('isValidForUpdate') is False:
+            return None
+        src = self._resolve(entity_logical, 'NEGO DATE', 'SOURCING DATE', 'REPORT DATE')
+        if not src or src.get('type') != 'DateTime':
+            return None
+        return ww['logical'], src['logical']
+
+    @staticmethod
+    def _fill_work_week(payload: dict, work_week) -> dict:
+        """Derive the Tue-Mon YYYY-WW work week from the row's date column unless
+        the caller already supplied one. Edits `payload` in place."""
+        if not work_week:
+            return payload
+        ww_attr, date_attr = work_week
+        if ww_attr in payload or not payload.get(date_attr):
+            return payload
+        label = pt_get_work_week(pt_format_date(payload[date_attr]))
+        if label and label != 'Unassigned':
+            payload[ww_attr] = label
+        return payload
 
     def _row_to_payload(self, row: dict, ctx: dict) -> dict:
         """Build the raw (unformatted) create payload for one row."""
@@ -821,7 +853,7 @@ class DataverseClient:
                 for dta in date_text_attrs:
                     if dta not in payload:
                         payload[dta] = serialized
-        return payload
+        return self._fill_work_week(payload, ctx.get('work_week'))
 
     def _format_payload(self, entity_logical: str, payload: dict) -> dict:
         out = {}
@@ -922,6 +954,8 @@ class DataverseClient:
                               'error': 'No changed columns or missing record id'}
                 prepared.append(None)
             else:
+                # A date edited in the grid moves the record to that date's work week.
+                self._fill_work_week(fields, self._work_week_columns(logical_name))
                 prepared.append((rid, self._format_payload(logical_name, fields)))
 
         updated = 0
