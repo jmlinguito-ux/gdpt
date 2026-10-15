@@ -1071,8 +1071,9 @@ class Api:
                 try:
                     history = self.dv_client.get_negotiation_visit_history(indexes, table)
                     ready = True
-                except Exception:
-                    pass
+                except Exception as _e:
+                    import logging
+                    logging.getLogger(__name__).warning('Offer history fetch failed: %s', _e, exc_info=True)
             else:
                 # File-based history is usable only if it carries INDEX NO.
                 history = [r for r in getattr(self, 'existing_records', []) if ol.index_key(r)]
