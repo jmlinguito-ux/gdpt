@@ -727,6 +727,7 @@ class DataverseClient:
             'SOURCER MATCH': ['SOURCER MATCH', 'NEGOTIATOR MATCH', 'SOURCING MATCH', 'cr63f_sourcermatch', 'cr63f_negotiatormatch'],
             'BUILD': ['BUILD', 'cr63f_build'],
             'OFFER LETTER ACTION': ['OFFER LETTER ACTION', 'cr63f_offerletteraction'],
+            'PROJECT TAG': ['PROJECT TAG', 'cr63f_projecttag'],
         }
 
         col_map = {}
@@ -1326,16 +1327,18 @@ class DataverseClient:
         area = self._resolve(ent, 'Area Index', 'Area-Index', 'AreaIndex')
         build = self._resolve(ent, 'Build', 'Build Name')
         ww = self._resolve(ent, 'Work Week', 'WorkWeek', 'WW', 'Work-Week')
-        select = [_select_name(c) for c in (area, build, ww) if c]
+        project_tag = self._resolve(ent, 'Project Tag', 'ProjectTag')
+        select = [_select_name(c) for c in (area, build, ww, project_tag) if c]
         if pk and pk not in select:
             select.append(pk)
-        rows = self._get_all(info['entitySetName'], select, formatted=_needs_formatting(area, build, ww))
+        rows = self._get_all(info['entitySetName'], select, formatted=_needs_formatting(area, build, ww, project_tag))
         out = []
         for r in rows:
             out.append({
                 'areaIndex': _formatted(r, area['logical']) if area else '',
                 'build': _formatted(r, build['logical']) if build else '',
                 'workWeek': _formatted(r, ww['logical']) if ww else '',
+                'projectTag': _formatted(r, project_tag['logical']) if project_tag else '',
                 '_record_id': _s(r.get(pk)),
                 '_entity_logical': ent,
             })
