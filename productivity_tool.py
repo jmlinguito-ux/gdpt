@@ -1147,10 +1147,14 @@ _BUILD_BALANCE_SENTINELS = {'NOT IN THE CURRENT BUILD', 'NOT IN CURRENT BUILD'}
 
 
 def _build_value_or_balance(build_val: str) -> str:
-    """A build cell's value, mapping the out-of-build sentinels to BALANCE."""
+    """A build cell's value for an area that IS in the Build table.
+
+    A blank build cell reads NO DATA (area found, but no BUILD value); the
+    out-of-build sentinels read BALANCE (area is no longer in the build). An
+    area that has no Build row at all is BALANCE, decided by the callers."""
     b = (build_val or '').strip()
     if not b:
-        return 'BALANCE'
+        return 'NO DATA'
     if re.sub(r'\s+', ' ', b).upper() in _BUILD_BALANCE_SENTINELS:
         return 'BALANCE'
     return b
@@ -1199,8 +1203,7 @@ def get_derived_build(row: dict, build_rows: list[dict], ignore_work_week: bool 
         for item in build_rows:
             if (item.get('areaIndex', '') or '').strip().lower() == area_index:
                 b = (item.get('build', '') or '').strip()
-                if b:
-                    return _build_value_or_balance(b)
+                return _build_value_or_balance(b)
         return 'BALANCE'
 
     date_ww = _record_work_week(row)
@@ -1211,8 +1214,7 @@ def get_derived_build(row: dict, build_rows: list[dict], ignore_work_week: bool 
         for item in build_rows:
             if (item.get('areaIndex', '') or '').strip().lower() == area_index:
                 b = (item.get('build', '') or '').strip()
-                if b:
-                    return _build_value_or_balance(b)
+                return _build_value_or_balance(b)
         return 'BALANCE'
 
     # Accept ONLY the immediately preceding work week (WW N-1). Wrap the year
@@ -1224,8 +1226,7 @@ def get_derived_build(row: dict, build_rows: list[dict], ignore_work_week: bool 
         if normalize_work_week(item.get('workWeek')) not in accepted:
             continue
         b = (item.get('build', '') or '').strip()
-        if b:
-            return _build_value_or_balance(b)
+        return _build_value_or_balance(b)
     return 'BALANCE'
 
 
@@ -2281,7 +2282,7 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
             bv = (b.get('build', '') or '').strip()
             if bv and bv.upper() != 'UNASSIGNED' and bv not in choices:
                 choices.append(bv)
-        for std in ['BUILD-1', 'BUILD-2', 'BUILD-3', 'BALANCE']:
+        for std in ['BUILD-1', 'BUILD-2', 'BUILD-3', 'BALANCE', 'NO DATA']:
             if std not in choices:
                 choices.append(std)
         return {'type': 'choice', 'choices': choices}
@@ -2464,8 +2465,8 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
         if not b_ai:
             continue
         b_val = str(item.get('build', '') or '').strip()
-        if not b_val:
-            continue
+        # A blank build cell is kept (reads NO DATA): the area IS in the Build
+        # table, it just has no BUILD value. Absent areas fall back to BALANCE.
         if b_ai not in build_first_by_area:
             build_first_by_area[b_ai] = _build_value_or_balance(b_val)
         ww_norm = normalize_work_week(item.get('workWeek'))
