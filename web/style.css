@@ -102,7 +102,7 @@
 :root[data-density="compact"] { --cell-pad: 6px 11px; --row-h: 28px; }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
 body {
   background: var(--page);
   color: var(--ink);
@@ -136,7 +136,9 @@ body.busy, body.busy * { cursor: progress !important; }
 .ta-r { text-align: right; }
 
 /* ---------- shell ---------- */
-.app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--page); }
+/* Pinned to the window: the page itself never scrolls (only the views inside do),
+   and the app always fills the window, also after maximize / restore. */
+.app { position: fixed; inset: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--page); }
 .body-split { display: grid; grid-template-columns: 232px 1fr; flex: 1; min-height: 0; }
 
 /* ---------- top bar ---------- */
