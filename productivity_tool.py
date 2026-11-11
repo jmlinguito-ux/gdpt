@@ -1147,10 +1147,14 @@ _BUILD_BALANCE_SENTINELS = {'NOT IN THE CURRENT BUILD', 'NOT IN CURRENT BUILD'}
 
 
 def _build_value_or_balance(build_val: str) -> str:
-    """A build cell's value, mapping the out-of-build sentinels to BALANCE."""
+    """A build cell's value for an area that IS in the Build table.
+
+    A blank build cell reads NO DATA (area found, but no BUILD value); the
+    out-of-build sentinels read BALANCE (area is no longer in the build). An
+    area that has no Build row at all is BALANCE, decided by the callers."""
     b = (build_val or '').strip()
     if not b:
-        return 'BALANCE'
+        return 'NO DATA'
     if re.sub(r'\s+', ' ', b).upper() in _BUILD_BALANCE_SENTINELS:
         return 'BALANCE'
     return b
@@ -1254,6 +1258,12 @@ def get_derived_build(row: dict, build_rows: list[dict], ignore_work_week: bool 
                       build_first_by_area=None, build_by_area_and_ww=None, index: dict | None = None) -> str:
     """Derived BUILD value only (see get_derived_build_and_tag)."""
     return get_derived_build_and_tag(row, build_rows, ignore_work_week, index)[0]
+
+
+def get_derived_project_tag(row: dict, build_rows: list[dict], ignore_work_week: bool = False,
+                            index: dict | None = None, **_unused) -> str:
+    """Derived PROJECT TAG value only (see get_derived_build_and_tag)."""
+    return get_derived_build_and_tag(row, build_rows, ignore_work_week, index)[1]
 
 
 def get_nego_distinction(row: dict, rows: list[dict], existing_records: list[dict] | None = None, mode: str = 'negotiation') -> str:
@@ -2255,10 +2265,13 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
             bv = (b.get('build', '') or '').strip()
             if bv and bv.upper() != 'UNASSIGNED' and bv not in choices:
                 choices.append(bv)
-        for std in ['BUILD-1', 'BUILD-2', 'BUILD-3', 'BALANCE']:
+        for std in ['BUILD-1', 'BUILD-2', 'BUILD-3', 'BALANCE', 'NO DATA']:
             if std not in choices:
                 choices.append(std)
         return {'type': 'choice', 'choices': choices}
+
+    if col_upper == 'PROJECT TAG':
+        return {'type': 'text'}
 
     if col_upper in ('NET OR GROSS (SALE)', 'NET OR GROSS (LEASE)', 'NET OR GROSS'):
         return {'type': 'choice', 'choices': ['NET', 'GROSS']}

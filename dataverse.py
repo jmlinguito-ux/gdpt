@@ -747,6 +747,7 @@ class DataverseClient:
             'BUILD': ['BUILD', 'cr63f_build'],
             'PROJECT TAG': ['PROJECT TAG', 'PROJECTTAG', 'cr63f_projecttag'],
             'OFFER LETTER ACTION': ['OFFER LETTER ACTION', 'cr63f_offerletteraction'],
+            'PROJECT TAG': ['PROJECT TAG', 'cr63f_projecttag'],
         }
 
         col_map = {}
@@ -1700,7 +1701,9 @@ class DataverseClient:
         """All-time dates for only the uploaded INDEX NOs; no property-area dependency."""
         ent = table_logical or self.config.get('nego_records_table') or 'cr63f_batangasnegorecord'
         if 'sourcing' in ent.lower() or 'productivity' in ent.lower():
-            raise ValueError('Choose a negotiation records table for offer visit history.')
+            # The existing-records source is a sourcing/productivity table — fall back to
+            # the configured nego records table so offer history still works.
+            ent = self.config.get('nego_records_table') or 'cr63f_batangasnegorecord'
         info = self.get_entity_info(ent)
         index = self._resolve(ent, 'INDEX NO', 'cr63f_indexno', 'cr63f_indexnumber')
         date = self._resolve(ent, 'NEGO DATE', 'cr63f_negotiationdate', 'cr63f_negodate', 'NEGO DATE TEXT')
