@@ -59,7 +59,7 @@ BATANGAS_NEGO_RECORD_COLUMNS = [
     'WITH OVERLAP ISSUE', 'LANDOWNER/AIF VERIFICATION', 'VERIFICATION OF HEIRS/AIF OF THE DECEASED RO/S',
     'HEIRS/AIF BASED ABROAD', 'NO NEXT OF KIN TO THE RO', 'AWAITING DECISION FROM THE LO', 'XCOORD', 'YCOORD',
     'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)',
-    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'WORK WEEK',
+    'MAPPING STATUS', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'PROJECT TAG', 'DATA USABILITY', 'CHECKER', 'YEAR', 'WORK WEEK',
     'OFFER LETTER ACTION',
 ]
 
@@ -69,14 +69,14 @@ LAND_SOURCING_RECORD_COLUMNS = [
     'PROPERTY IDENTIFICATION NO (PIN)', 'REGISTERED OWNER', 'AUTHORIZED REPRESENTATIVE', 'TITLE TYPE', 'TITLE NO',
     'LOT AREA (SQM)', 'CLASSIFICATION', 'CLASS', 'INDICATIVE PRICE SALE', 'PAYMENT TERMS', 'NET OR GROSS',
     'INDICATIVE PRICE LEASE', 'CONTRACT TERMS (LEASE)', 'ESCALATION', 'XCOORD', 'YCOORD', 'MAPPING STATUS',
-    'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'WORK WEEK',
+    'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'PROJECT TAG', 'DATA USABILITY', 'CHECKER', 'YEAR', 'WORK WEEK',
 ]
 
-DERIVED_TEMPLATE_COLUMNS = {'ID', 'MAPPING STATUS', 'MUNI CODE', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'DATA USABILITY', 'YEAR', 'WORK WEEK', 'LO', 'OFFER LETTER ACTION'}
+DERIVED_TEMPLATE_COLUMNS = {'ID', 'MAPPING STATUS', 'MUNI CODE', 'MUNICODE', 'LOT AREA (HA)', 'BUILD', 'PROJECT TAG', 'DATA USABILITY', 'YEAR', 'WORK WEEK', 'LO', 'OFFER LETTER ACTION'}
 OPTIONAL_UPLOAD_COLUMNS = {'CORRECT GROUP', 'CORRECT TEAM', 'HEAD NEGOTIATOR', 'PRICE VARIANCE (SALE)', 'LO'}
 # Derived review columns that calculate_review_rows recomputes — a manual edit to
 # one of these is remembered in row['_overrides'] so re-calculating keeps it.
-DERIVED_REVIEW_COLUMNS = {'AREA-INDEX', 'MUNICODE', 'MAPPING STATUS', 'BUILD', 'DATA USABILITY', 'CHECKER', 'YEAR', 'LOT AREA (HA)'}
+DERIVED_REVIEW_COLUMNS = {'AREA-INDEX', 'MUNICODE', 'MAPPING STATUS', 'BUILD', 'PROJECT TAG', 'DATA USABILITY', 'CHECKER', 'YEAR', 'LOT AREA (HA)'}
 
 REQUIRED_COLUMNS_BY_MODE = {
     'negotiation': ['ID', 'NEGOTIATOR NAME', 'AREA-INDEX', 'NEGO DATE', 'CLASSIFICATION', 'MUNICIPALITY', 'DATA USABILITY'],
@@ -1164,69 +1164,96 @@ def _record_work_week(row: dict) -> int | None:
     return iso_work_week_num(record_date) if record_date else None
 
 
-def get_derived_build(row: dict, build_rows: list[dict], ignore_work_week: bool = False,
-                      build_first_by_area: dict[str, str] | None = None,
-                      build_by_area_and_ww: dict[tuple[str, int], str] | None = None) -> str:
-    """Derived BUILD value for a row.
+_BUILD_LABEL_FIXES = {'OUTSIDE CONSO': 'NON-CONSO', 'NON CONSO': 'NON-CONSO', 'NONCONSO': 'NON-CONSO',
+                      'NON TERRA BLOCK': 'NON-TERRA BLOCK', 'NONTERRA BLOCK': 'NON-TERRA BLOCK'}
 
-    An area-index only counts as "in the build" when it has a Build row for the
-    work week IMMEDIATELY BEFORE the record's work week (WW N-1). So a WW-35
-    record needs its Build at WW-34. If the area-index is absent from the Build
-    table, or present only in other work weeks (e.g. only WW-33), it reads as
-    BALANCE. A matched row whose value is 'NOT IN THE CURRENT BUILD' is BALANCE.
 
-    When ignore_work_week is True (user opts to use current build as reference),
-    the Area Index is matched against whatever is in build_rows without work week filtering.
+def _normalize_build_label(build_val: str) -> str:
+    """One spelling per build label: Tarlac's OUTSIDE CONSO reads NON-CONSO and a
+    dash-less NON CONSO / NONCONSO reads NON-CONSO (Batangas: NON-TERRA BLOCK)."""
+    b = re.sub(r'\s+', ' ', (build_val or '').strip())
+    return _BUILD_LABEL_FIXES.get(b.upper(), b)
+
+
+def _resolve_build_entry(build_val: str, project_tag: str) -> tuple[str, str]:
+    """(BUILD, PROJECT TAG) for one Build-table row that matches the record's week.
+
+    value            -> (value, folder)        e.g. ('CONSO', 'QUEZON-1')
+    blank            -> ('NO DATA', folder)    area found, but no build value
+    'NOT IN ... BUILD' sentinel -> ('BALANCE', 'BALANCE')  same as not found
+    """
+    b = (build_val or '').strip()
+    tag = (project_tag or '').strip()
+    if not b:
+        return 'NO DATA', tag
+    if re.sub(r'\s+', ' ', b).upper() in _BUILD_BALANCE_SENTINELS:
+        return 'BALANCE', 'BALANCE'
+    return _normalize_build_label(b), tag
+
+
+def index_build_rows(build_rows: list[dict]) -> dict:
+    """Pre-index Build-table rows once so every record is an O(1) lookup.
+
+    A real value always beats a blank one for the same area / week."""
+    first: dict[str, tuple[str, str]] = {}
+    by_ww: dict[tuple[str, int], tuple[str, str]] = {}
+    weeks: set[int] = set()
+    for item in (build_rows or []):
+        ai = str(item.get('areaIndex', '') or '').strip().lower()
+        if not ai:
+            continue
+        entry = _resolve_build_entry(item.get('build', ''), item.get('projectTag', ''))
+        ww = normalize_work_week(item.get('workWeek'))
+        if ww is not None:
+            weeks.add(ww)
+        if ai not in first or (first[ai][0] == 'NO DATA' and entry[0] != 'NO DATA'):
+            first[ai] = entry
+        if ww is not None:
+            key = (ai, ww)
+            if key not in by_ww or (by_ww[key][0] == 'NO DATA' and entry[0] != 'NO DATA'):
+                by_ww[key] = entry
+    return {'first': first, 'by_ww': by_ww, 'weeks': weeks}
+
+
+def get_derived_build_and_tag(row: dict, build_rows: list[dict], ignore_work_week: bool = False,
+                              index: dict | None = None) -> tuple[str, str]:
+    """Derived (BUILD, PROJECT TAG) for a row.
+
+    * Area-index not in the Build table for the required week -> BALANCE / BALANCE.
+    * Found with a build value -> (value, the folder in the Build row's Project Tag).
+    * Found, but the build cell is blank -> NO DATA / folder.
+    * The Build for the required week is not loaded yet -> ('', ''): left empty so a
+      missing Build is never written as BALANCE. A later re-check fills it in.
+
+    The required week is the work week IMMEDIATELY BEFORE the record's work week
+    (WW N-1; WW-01 looks at the prior year's WW-52/53). With ignore_work_week the
+    area-index is matched against whatever is in the Build table.
     """
     area_index = get_area_index(row).strip().lower()
     if not area_index:
-        return 'BALANCE'
+        return 'BALANCE', 'BALANCE'
+    idx = index if index is not None else index_build_rows(build_rows)
 
-    if build_first_by_area is not None:
-        if ignore_work_week:
-            return build_first_by_area.get(area_index, 'BALANCE')
-        date_ww = _record_work_week(row)
-        if date_ww is None:
-            return build_first_by_area.get(area_index, 'BALANCE')
-        accepted = (52, 53) if date_ww == 1 else (date_ww - 1,)
-        for acc_ww in accepted:
-            val = build_by_area_and_ww.get((area_index, acc_ww)) if build_by_area_and_ww else None
-            if val:
-                return val
-        return 'BALANCE'
-
-    if ignore_work_week:
-        for item in build_rows:
-            if (item.get('areaIndex', '') or '').strip().lower() == area_index:
-                b = (item.get('build', '') or '').strip()
-                if b:
-                    return _build_value_or_balance(b)
-        return 'BALANCE'
-
-    date_ww = _record_work_week(row)
+    date_ww = None if ignore_work_week else _record_work_week(row)
     if date_ww is None:
-        # No usable record date -> can't place the row against a work week. Fall
-        # back to a plain area-index match so the build isn't wrongly zeroed
-        # while a date is still being fixed (the bad date is flagged separately).
-        for item in build_rows:
-            if (item.get('areaIndex', '') or '').strip().lower() == area_index:
-                b = (item.get('build', '') or '').strip()
-                if b:
-                    return _build_value_or_balance(b)
-        return 'BALANCE'
+        # Bad / missing date (flagged elsewhere) or the user opted to ignore weeks:
+        # plain area-index match so the build isn't wrongly zeroed.
+        return idx['first'].get(area_index, ('BALANCE', 'BALANCE'))
 
-    # Accept ONLY the immediately preceding work week (WW N-1). Wrap the year
-    # boundary: the week before WW-01 is the prior year's WW-52 or WW-53.
-    accepted = {52, 53} if date_ww == 1 else {date_ww - 1}
-    for item in build_rows:
-        if (item.get('areaIndex', '') or '').strip().lower() != area_index:
-            continue
-        if normalize_work_week(item.get('workWeek')) not in accepted:
-            continue
-        b = (item.get('build', '') or '').strip()
-        if b:
-            return _build_value_or_balance(b)
-    return 'BALANCE'
+    accepted = (52, 53) if date_ww == 1 else (date_ww - 1,)
+    if not (set(accepted) & idx['weeks']):
+        return '', ''
+    for acc_ww in accepted:
+        hit = idx['by_ww'].get((area_index, acc_ww))
+        if hit:
+            return hit
+    return 'BALANCE', 'BALANCE'
+
+
+def get_derived_build(row: dict, build_rows: list[dict], ignore_work_week: bool = False,
+                      build_first_by_area=None, build_by_area_and_ww=None, index: dict | None = None) -> str:
+    """Derived BUILD value only (see get_derived_build_and_tag)."""
+    return get_derived_build_and_tag(row, build_rows, ignore_work_week, index)[0]
 
 
 def get_nego_distinction(row: dict, rows: list[dict], existing_records: list[dict] | None = None, mode: str = 'negotiation') -> str:
@@ -1354,6 +1381,7 @@ def build_productivity_rows(rows: list[dict], teams: list[dict], mapping_statuse
                 'NEGOTIATOR NAME': name, 'NEGO CODE': row.get('NEGO CODE', '') or '',
                 'NEGOTIATOR MATCH': negotiator_match, 'DATA USABILITY': data_usability,
                 'BUILD': row.get('BUILD', '') or '',
+                'PROJECT TAG': row.get('PROJECT TAG', '') or '',
                 **({'OFFER LETTER ACTION': row.get('OFFER LETTER ACTION', '') or ''} if mode == 'negotiation' else {}),
                 'UNIQUE ID': f"{derived_area_index}{record_date}{checker}", 'CHECKER': checker, 'POINTS': 0,
                 'NEGO DISTINCTION': '', 'LO': get_lo_occurrence_name(row), 'LO OCCURRENCE KEY': get_lo_occurrence_name(row),
@@ -1716,7 +1744,7 @@ def enrich_workspace_rows(productivity_rows: list[dict], teams: list[dict], hist
 OUTPUT_COLUMNS = [
     'ITEM #', 'AREA INDEX', 'NEGO DATE', 'WORK WEEK', 'PROVINCE', 'MUNICIPALITY', 'BARANGAY', 'TYPE OF REPORT', 'ACTION',
     'NEGOTIATOR NAME', 'NEGO CODE', 'MATCHED NEGOTIATOR NAME', 'TEAM', 'CORRECT TEAM', 'TEAM MATCH', 'GROUP',
-    'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'BUILD', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'OFFER LETTER ACTION', 'LO', 'POINTS',
+    'CORRECT GROUP', 'GROUP MATCH', 'DATA USABILITY', 'BUILD', 'PROJECT TAG', 'UNIQUE ID', 'CHECKER', 'NEGO DISTINCTION', 'OFFER LETTER ACTION', 'LO', 'POINTS',
     'LO OCCURRENCE BY DAY', 'LO OCCURRENCE BY WW', 'LO POINTS BY DAY', 'LO POINTS BY WW', 'LO COUNT BY DAY', 'LO COUNT BY WW',
 ]
 
@@ -1832,6 +1860,7 @@ def load_reference_workbook(path: str):
             for d in dicts:
                 build_rows.append({'areaIndex': _pick(d, 'Area Index', 'Area-Index', 'AreaIndex'),
                                    'build': _pick(d, 'Build'),
+                                   'projectTag': _pick(d, 'Project Tag', 'PROJECT TAG', 'ProjectTag'),
                                    'workWeek': _pick(d, 'Work Week', 'WORK WEEK', 'WorkWeek', 'WW', 'Work-Week')})
     wb.close()
     teams = [t for t in teams if t['employeeName']]
@@ -1846,7 +1875,7 @@ REFERENCE_TEMPLATE_HEADERS = {
     'team': ['Employee Name', 'Team', 'Group', 'Department', 'Memo No.'],
     'municipality': ['Municipality', 'MuniCode', 'Province'],
     'mapping': ['Description', 'Mapping Status', 'Data Usability'],
-    'build': ['Area Index', 'Build', 'Work Week'],
+    'build': ['Area Index', 'Build', 'Work Week', 'Project Tag'],
     'offer': [label for _, label in ol.FIELDS],
     'existing': ['ID', 'AREA-INDEX'],
 }
@@ -1856,7 +1885,7 @@ REFERENCE_VIEW_COLUMNS = {
              ('memoNo', 'Memo No.')],
     'municipality': [('municipality', 'Municipality'), ('muniCode', 'MuniCode'), ('province', 'Province')],
     'mapping': [('description', 'Description'), ('mappingLabel', 'Mapping Status'), ('dataUsability', 'Data Usability')],
-    'build': [('areaIndex', 'Area Index'), ('build', 'Build'), ('workWeek', 'Work Week')],
+    'build': [('areaIndex', 'Area Index'), ('build', 'Build'), ('workWeek', 'Work Week'), ('projectTag', 'Project Tag')],
     'offer': ol.FIELDS,
     'existing': [('iD1', 'ID'), ('aREAINDEX', 'AREA-INDEX'), ('date', 'Record Date'), ('classification', 'Classification')],
 }
@@ -1942,7 +1971,8 @@ def load_single_reference(path: str, kind: str) -> list[dict]:
                     area = f"{muni}-{idx}"
             build_val = _pick(d, 'Build', 'BUILD', 'Build Status', 'BUILD STATUS', 'Build_Status', 'Status', 'STATUS')
             ww_val = _pick(d, 'Work Week', 'WORK WEEK', 'WorkWeek', 'WW', 'Work-Week', 'WORKWEEK')
-            out.append({'areaIndex': area, 'build': build_val, 'workWeek': ww_val})
+            tag_val = _pick(d, 'Project Tag', 'PROJECT TAG', 'ProjectTag', 'Project-Tag')
+            out.append({'areaIndex': area, 'build': build_val, 'workWeek': ww_val, 'projectTag': tag_val})
         return [r for r in out if r['areaIndex']]
     if kind == 'existing':
         for d in rows:
@@ -2398,20 +2428,7 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
             batch_by_area_date[(ai, d)].append(r)
 
     # Pre-index build rows for instant build lookup
-    build_first_by_area: dict[str, str] = {}
-    build_by_area_and_ww: dict[tuple[str, int], str] = {}
-    for item in (build_rows or []):
-        b_ai = str(item.get('areaIndex', '') or '').strip().lower()
-        if not b_ai:
-            continue
-        b_val = str(item.get('build', '') or '').strip()
-        if not b_val:
-            continue
-        if b_ai not in build_first_by_area:
-            build_first_by_area[b_ai] = _build_value_or_balance(b_val)
-        ww_norm = normalize_work_week(item.get('workWeek'))
-        if ww_norm is not None and (b_ai, ww_norm) not in build_by_area_and_ww:
-            build_by_area_and_ww[(b_ai, ww_norm)] = _build_value_or_balance(b_val)
+    build_index = index_build_rows(build_rows)
 
     offer_actions = (ol.calculate_actions(area_calculated, offer_rows or [], offer_history or [],
                                          offer_reference_ready, offer_history_ready)
@@ -2426,11 +2443,12 @@ def calculate_review_rows(rows: list[dict], municipality_codes: list[dict], mapp
         derived_du = get_derived_data_usability(row_with_ms, mapping_statuses, None, existing_records,
                                                 municipality_codes, existing_area_set=existing_area_set,
                                                 mode=mode)
+        build_and_tag = get_derived_build_and_tag(row, build_rows, ignore_work_week=ignore_build_work_week,
+                                                  index=build_index)
         calc = {
             **row_with_ms,
-            'BUILD': get_derived_build(row, build_rows, ignore_work_week=ignore_build_work_week,
-                                       build_first_by_area=build_first_by_area,
-                                       build_by_area_and_ww=build_by_area_and_ww),
+            'BUILD': build_and_tag[0],
+            'PROJECT TAG': build_and_tag[1],
             'DATA USABILITY': derived_du,
             'CHECKER': get_checker(row, area_calculated, existing_records, history_ready=history_ready, mode=mode),
             'YEAR': get_year_from_row_date(row),

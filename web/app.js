@@ -279,9 +279,10 @@ window.onBackendDone = function (info) {
     if (typeof unfetchedRefKinds !== 'undefined') unfetchedRefKinds.clear();
   }
   if (info && info.message) toast(info.message, !!info.error);
-  if (info && info.receipt && ['syncPreview', 'syncResult', 'syncClosed'].includes(info.receipt.kind)) {
+  if (info && info.receipt && ['syncPreview', 'recheckPreview', 'syncResult', 'syncClosed'].includes(info.receipt.kind)) {
     const r = info.receipt;
     if (r.kind === 'syncPreview') openSyncModal(r);
+    else if (r.kind === 'recheckPreview') openRecheckPreview(r);
     else if (r.kind === 'syncClosed') closeSyncModal();  // cancelled backup / error: dismiss the modal
     else { closeSyncModal(); showSyncResult(r); }
   } else if (info && info.receipt) {
@@ -339,12 +340,14 @@ function openSyncModal(r) {
     <div class="app-modal">
       <div class="am-body">
         <h2>${_bsEsc(r.title || 'Sync → Dataverse')}</h2>
-        <p class="am-sub">Target: <b>${_bsEsc(r.targetTitle || r.target || '')}</b> &nbsp;&bull;&nbsp; File: ${_bsEsc(r.fileName || '')} &nbsp;&bull;&nbsp; ${r.currentCount || 0} row(s) in table now</p>
+        <p class="am-sub">Target: <b>${_bsEsc(r.targetTitle || r.target || '')}</b> &nbsp;&bull;&nbsp; ${r.subText ? _bsEsc(r.subText) : `File: ${_bsEsc(r.fileName || '')} &nbsp;&bull;&nbsp; ${r.currentCount || 0} row(s) in table now`}</p>
       </div>
       <div class="am-chips">
-        <span class="am-chip ins">Insert ${r.insertCount || 0}</span>
-        <span class="am-chip upd">Update ${r.updateCount || 0}</span>
-        <span class="am-chip unch">Unchanged ${r.unchangedCount || 0}</span>
+        ${(r.chips || [
+          { cls: 'ins', label: `Insert ${r.insertCount || 0}` },
+          { cls: 'upd', label: `Update ${r.updateCount || 0}` },
+          { cls: 'unch', label: `Unchanged ${r.unchangedCount || 0}` },
+        ]).map(c => `<span class="am-chip ${_bsEsc(c.cls)}">${_bsEsc(c.label)}</span>`).join('')}
       </div>
       <div id="syncProgress" class="am-progress" style="display:none;">
         <div class="am-progress-track"><div id="syncBar" class="am-progress-bar"></div></div>
@@ -352,7 +355,7 @@ function openSyncModal(r) {
       </div>
       <p id="syncNote" class="am-note">${_bsEsc(note)}</p>
       <label id="syncBackupRow" class="am-check">
-        <input type="checkbox" id="syncBackup" checked /> Create a CSV backup of the current table before applying
+        <input type="checkbox" id="syncBackup" checked /> ${_bsEsc(r.backupLabel || 'Create a CSV backup of the current table before applying')}
       </label>
       <div id="syncActions" class="am-actions">
         <button class="btn" id="syncCancel">Cancel</button>
@@ -370,8 +373,184 @@ function openSyncModal(r) {
     document.getElementById('syncProgress').style.display = 'block';
     const noteEl = document.getElementById('syncNote');
     if (noteEl) noteEl.style.marginBottom = '20px';
-    document.getElementById('syncProgressText').textContent = doBackup ? 'Choose where to save the backup…' : 'Writing to Dataverse…';
+    document.getElementById('syncProgressText').textContent = doBackup ? 'Choose where to save the file…' : 'Writing to Dataverse…';
     call(commitMethod, doBackup);
+  });
+}
+
+// Sync Build from the BUILD PROJECT SITE folders: ask for the work week (and an
+// optional locally synced copy of the library), then stage a preview.
+async function openBuildSiteModal() {
+  const a = api();
+  if (!a) return;
+  const d = (await a.get_build_site_defaults()) || {};
+  const ov = document.createElement('div');
+  ov.id = 'buildSiteOverlay';
+  ov.className = 'app-modal-overlay';
+  ov.innerHTML = `
+    <div class="app-modal">
+      <div class="am-body">
+        <h2>Sync Build from BUILD PROJECT SITE</h2>
+        <p class="am-sub">Reads one work week of the project folders and adds or corrects Build rows (Project Tag = folder name).</p>
+      </div>
+      <label class="am-check" style="display:block;">Work week (YYYY-WW)
+        <input class="input" id="bsWeek" value="${_bsEsc(d.workWeek || '')}" style="width:120px;margin-left:8px;" />
+      </label>
+      <p class="am-note" style="margin-top:12px;">Source folder (optional): a synced copy of the library. Leave empty to read from SharePoint directly.</p>
+      <div style="display:flex;gap:8px;align-items:center;margin:6px 0 14px;">
+        <input class="input" id="bsFolder" value="${_bsEsc(d.folder || '')}" style="flex:1;" placeholder="Paste the SharePoint link or Browse (optional)" />
+        <button class="btn" id="bsBrowse">Browse…</button>
+        <button class="btn" id="bsClear">Clear</button>
+      </div>
+      <div class="am-actions">
+        <button class="btn" id="bsCancel">Cancel</button>
+        <button class="btn primary" id="bsStart">Read files</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  document.getElementById('bsCancel').addEventListener('click', close);
+  document.getElementById('bsClear').addEventListener('click', () => { document.getElementById('bsFolder').value = ''; });
+  document.getElementById('bsBrowse').addEventListener('click', async () => {
+    const r = await a.choose_build_site_dir();
+    if (r && r.path) document.getElementById('bsFolder').value = r.path;
+  });
+  document.getElementById('bsStart').addEventListener('click', () => {
+    const ww = document.getElementById('bsWeek').value.trim();
+    const folder = document.getElementById('bsFolder').value.trim();
+    close();
+    toast('Reading the Build files — large workbooks can take a few minutes…', false);
+    fire('preview_build_site_sync', selectedTableMappings.build || '', ww, folder);
+  });
+}
+
+// Settings > Maintenance: re-check BUILD and PROJECT TAG of one published work week
+// (records + productivity) against the BUILD PROJECT SITE uploads.
+let _mtLoaded = false;
+// Same province as the chosen records table: cr63f_batangasnegorecords -> cr63f_batangasnegoproductivities
+function _mtProvinceKey(logical) {
+  const m = String(logical || '').toLowerCase().match(/^cr63f_(.+?)(nego|sourcing)/);
+  return m ? m[1] : '';
+}
+function syncMaintenanceProductivity() {
+  const rec = $('mtRecords').value;
+  const key = _mtProvinceKey(rec);
+  if (!key) return;
+  const prod = $('mtProd');
+  const hit = Array.from(prod.options).find(o => _mtProvinceKey(o.value) === key);
+  if (hit) prod.value = hit.value;
+}
+
+async function refreshMaintenanceTables() {
+  const a = api();
+  if (!a || !(lastState && lastState.connected)) return;
+  const set = (document.querySelector('#mtSetSeg .active') || {}).dataset?.mset || 'nego';
+  const fill = async (selId, scope) => {
+    const sel = $(selId);
+    const r = await a.get_editor_tables(scope);
+    sel.innerHTML = '<option value="">— none —</option>';
+    if (r && r.ok) {
+      (r.tables || []).forEach(t => sel.appendChild(new Option(t.displayName, t.logicalName, false, t.logicalName === r.saved)));
+    }
+  };
+  await fill('mtRecords', set + '-records');
+  await fill('mtProd', set + '-productivity');
+  syncMaintenanceProductivity();
+  const d = (await a.get_build_site_defaults()) || {};
+  if (!$('mtWeek').value) $('mtWeek').value = d.maintWeek || '';
+  _mtLoaded = true;
+}
+
+function initMaintenancePanel() {
+  const seg = $('mtSetSeg');
+  if (!seg || seg.dataset.bound) return;
+  seg.dataset.bound = '1';
+  seg.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    seg.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
+    refreshMaintenanceTables();
+  }));
+  document.querySelectorAll('.nav-item[data-view="settings"]').forEach(n =>
+    n.addEventListener('click', () => { refreshMaintenanceTables(); }));
+  $('mtRecords').addEventListener('change', syncMaintenanceProductivity);
+  $('mtPreview').addEventListener('click', () => {
+    if (!(lastState && lastState.connected)) { toast('Connect to Dataverse first.', true); return; }
+    toast('Checking… reading the Build file from the SharePoint site can take a few minutes the first time.', false);
+    fire('preview_build_tag_recheck', $('mtRecords').value, $('mtProd').value,
+         $('mtWeek').value.trim(), parseInt($('mtOffset').value, 10) || 0, '', []);
+  });
+}
+document.addEventListener('DOMContentLoaded', initMaintenancePanel);
+if (document.readyState !== 'loading') initMaintenancePanel();
+
+// Maintenance re-check result: what was compared, against which Build files,
+// and exactly which rows would change. Reuses the sync overlay id so the shared
+// progress / result / close handlers work unchanged.
+function openRecheckPreview(r) {
+  closeSyncModal();
+  const n = v => Number(v || 0).toLocaleString();
+  const esc = _bsEsc;
+  const weeks = (r.compareWeeks || []).map(w => 'WW' + w.slice(5)).join(' / ');
+  const tables = (r.tables || []).map(t => `${esc(t.name)} ${n(t.rows)}`).join(' + ');
+  const nothing = !r.toChange;
+  const status = nothing
+    ? `<div class="rc-status ok">&#10003; Everything already matches the Build file${(r.files || []).length === 1 ? '' : 's'}. Nothing needs to change.</div>`
+    : `<div class="rc-status warn">${n(r.toChange)} row(s) have a BUILD or PROJECT TAG that differs from the Build file and will be updated.</div>`;
+  const val = (o, nv) => o === nv ? esc(nv || '—')
+    : `<span class="rc-old">${esc(o || '(blank)')}</span> &rarr; <b>${esc(nv || '(blank)')}</b>`;
+  const changes = (r.changes || []).slice(0, 50).map(c => `
+      <tr><td>${esc(c.table)}</td><td class="mono">${esc(c.area)}</td>
+      <td>${val(c.oldBuild, c.newBuild)}</td><td>${val(c.oldTag, c.newTag)}</td></tr>`).join('');
+  const more = (r.toChange || 0) > 50 ? `<p class="rc-more">…and ${n(r.toChange - 50)} more. All of them are written to the CSV if you keep the box below ticked.</p>` : '';
+  const files = (r.files || []).map(f => `
+      <li><b>${esc(f.folder)}</b> &middot; ${n(f.rows)} area indexes${!f.buildHeader ? ' &middot; <span class="rc-old">no build column (NO DATA)</span>' : (f.buildHeader === 'STATUS' ? ' &middot; build read from the STATUS column' : '')}
+      <div class="rc-path mono" title="${esc(f.path || f.file)}">${esc(f.path || f.file)}</div></li>`).join('');
+  const missing = (r.missing || []).map(m => `<li><b>${esc(m.folder)}</b> &mdash; ${esc(m.reason)}</li>`).join('');
+  const ov = document.createElement('div');
+  ov.id = 'syncOverlay';
+  ov.className = 'app-modal-overlay';
+  ov.innerHTML = `
+    <div class="app-modal rc-modal">
+      <div class="am-body">
+        <h2>Build &amp; Project Tag check &mdash; ${esc(r.province)} ${esc(r.recordSet)}, ${esc(r.workWeek)}</h2>
+        <p class="am-sub">Checked ${n(r.totalRows)} published rows (${tables}) against the BUILD PROJECT SITE upload for <b>${esc(weeks)}</b>${r.sameWeek ? ' (same work week)' : ' (the week before)'}.</p>
+      </div>
+      ${status}
+      <div class="rc-stats">
+        <div class="rc-stat ${nothing ? '' : 'warn'}"><div class="rc-num">${n(r.toChange)}</div><div class="rc-lbl">Will be updated</div></div>
+        <div class="rc-stat"><div class="rc-num">${n(r.alreadyCorrect)}</div><div class="rc-lbl">Already correct</div></div>
+        <div class="rc-stat"><div class="rc-num">${n(r.noFile)}</div><div class="rc-lbl">Skipped &ndash; no Build file for that week</div></div>
+      </div>
+      <div class="rc-section">
+        <div class="rc-h">Compared with ${(r.files || []).length} Build file(s)${r.fromFiles ? ' you chose' : ' on SharePoint'}</div>
+        ${files ? `<ul class="rc-list">${files}</ul>` : '<p class="rc-more">No Build file was found for that week.</p>'}
+        ${missing ? `<details class="rc-details"><summary>${(r.missing || []).length} folder(s) had no file for this week</summary><ul class="rc-list">${missing}</ul></details>` : ''}
+      </div>
+      ${changes ? `<div class="rc-section"><div class="rc-h">Changes</div>
+        <div class="rc-table-wrap"><table class="rc-table"><thead><tr><th>Table</th><th>Area index</th><th>BUILD</th><th>PROJECT TAG</th></tr></thead><tbody>${changes}</tbody></table></div>${more}</div>` : ''}
+      <div id="syncProgress" class="am-progress" style="display:none;">
+        <div class="am-progress-track"><div id="syncBar" class="am-progress-bar"></div></div>
+        <p id="syncProgressText" class="am-progress-text">Preparing…</p>
+      </div>
+      <p id="syncNote" class="am-note">Only BUILD and PROJECT TAG are changed. Rows are never added or deleted.${(r.skipped || []).length ? ' Not checked (no BUILD / PROJECT TAG column): ' + esc(r.skipped.join(', ')) + '.' : ''}</p>
+      ${nothing ? '' : `<label id="syncBackupRow" class="am-check"><input type="checkbox" id="syncBackup" checked /> Save the current values to a CSV first (so the change can be undone)</label>`}
+      <div id="syncActions" class="am-actions">
+        ${nothing ? '<button class="btn primary" id="syncCancel">Close</button>'
+                  : `<button class="btn" id="syncCancel">Cancel</button><button class="btn primary" id="syncApply">Update ${n(r.toChange)} row(s)</button>`}
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  const cancel = () => { call('cancel_build_tag_recheck'); closeSyncModal(); };
+  ov.addEventListener('click', e => { if (e.target === ov && !ov.dataset.working) cancel(); });
+  document.getElementById('syncCancel').addEventListener('click', cancel);
+  const apply = document.getElementById('syncApply');
+  if (apply) apply.addEventListener('click', () => {
+    const doBackup = document.getElementById('syncBackup').checked;
+    ov.dataset.working = '1';
+    document.getElementById('syncActions').style.display = 'none';
+    document.getElementById('syncBackupRow').style.display = 'none';
+    document.getElementById('syncProgress').style.display = 'block';
+    document.getElementById('syncProgressText').textContent = doBackup ? 'Choose where to save the CSV…' : 'Writing to Dataverse…';
+    call('commit_build_tag_recheck', doBackup);
   });
 }
 
@@ -490,6 +669,8 @@ async function showReference(kind) {
   const syncable = REF_SYNC_KINDS.includes(kind);
   const syncBtn = $('refBuildSync');
   if (syncBtn) syncBtn.classList.toggle('hidden', !syncable);
+  const siteBtn = $('refBuildSite');
+  if (siteBtn) siteBtn.classList.toggle('hidden', kind !== 'build');
   const upBtn = $('refUploadFile');
   if (upBtn) upBtn.classList.toggle('hidden', syncable);
 
@@ -4818,6 +4999,13 @@ function wire() {
       if (!(lastState && lastState.connected)) { toast('Connect to Dataverse first.', true); return; }
       if (k === 'build') fire('preview_build_sync', selectedTableMappings.build || '');
       else fire('preview_reference_sync', k, selectedTableMappings[k] || '');
+    });
+  }
+  const refSiteBtn = $('refBuildSite');
+  if (refSiteBtn) {
+    refSiteBtn.addEventListener('click', () => {
+      if (!(lastState && lastState.connected)) { toast('Connect to Dataverse first.', true); return; }
+      openBuildSiteModal();
     });
   }
   const refExportCsvBtn = $('refExportCsv');

@@ -429,6 +429,7 @@
               <button class="btn hidden" id="refRefresh" title="Reload from Dataverse">Refresh</button>
               <button class="btn" id="refUploadFile" title="Upload Excel or CSV file to replace records in this table">Upload file</button>
               <button class="btn hidden" id="refBuildSync" title="Upload a Build file and sync it to the selected Dataverse Build table (insert new, overwrite on newer Work Week, never delete)">Sync to Dataverse</button>
+              <button class="btn hidden" id="refBuildSite" title="Read a work week of the BUILD PROJECT SITE folders and add or correct this Build table (Project Tag = folder name)">Sync from Build Project Site</button>
               <button class="btn" id="refClearFilters" disabled>Clear filters</button>
               <button class="btn primary" id="refAddRow">Add row</button>
             </div>
@@ -835,6 +836,49 @@
                   <button class="btn" id="btnCheckUpdate">Check for updates</button>
                   <button class="btn primary hidden" id="btnDownloadUpdate">Download update</button>
                   <button class="btn primary hidden" id="btnInstallUpdate">Update and restart</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel" id="maintenancePanel">
+              <div class="panel-head">
+                <h3>Maintenance</h3>
+                <span class="eyebrow">Check Build &amp; Project Tag</span>
+              </div>
+              <div class="panel-body form-rows">
+                <p class="form-hint" style="margin:0 0 4px;">Compares the BUILD and PROJECT TAG of published records and productivity rows in one work week with the BUILD PROJECT SITE file for that week. You see the results and every change first. Nothing is written until you click Update.</p>
+                <div class="form-row">
+                  <span class="form-label">1. Record set</span>
+                  <div class="form-control">
+                    <div class="seg" id="mtSetSeg">
+                      <button class="btn xs active" data-mset="nego">Nego</button>
+                      <button class="btn xs" data-mset="sourcing">Sourcing</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <span class="form-label">Records table</span>
+                  <div class="form-control"><select id="mtRecords" class="select wide"><option value="">Connect to Dataverse…</option></select></div>
+                </div>
+                <div class="form-row">
+                  <span class="form-label">Productivity table</span>
+                  <div class="form-control"><select id="mtProd" class="select wide"><option value="">Connect to Dataverse…</option></select></div>
+                </div>
+                <div class="form-row">
+                  <span class="form-label">2. Work week</span>
+                  <div class="form-control">
+                    <input type="text" id="mtWeek" class="input mono-input" placeholder="YYYY-WW" style="width:110px;" />
+                    <select id="mtOffset" class="select">
+                      <option value="0">Use that same week's Build file</option>
+                      <option value="1">Use the week before's Build file</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <div class="panel-foot">
+                <span class="eyebrow">Read-only until you confirm.</span>
+                <div class="foot-actions">
+                  <button class="btn primary" id="mtPreview">Check for differences</button>
                 </div>
               </div>
             </div>

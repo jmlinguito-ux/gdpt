@@ -1018,6 +1018,28 @@ tr.row-invalid-date:hover td {
 .am-progress-track { height: 10px; background: var(--hover); border-radius: 6px; overflow: hidden; }
 .am-progress-bar { height: 100%; width: 0%; background: var(--accent); transition: width .2s; }
 .am-progress-text { margin: 6px 0 0; color: var(--ink2); font-size: 12.5px; }
+.rc-modal { max-width: 720px; max-height: 90vh; overflow-y: auto; }
+.rc-status { margin: 4px 24px 0; padding: 10px 14px; border-radius: 10px; font-size: 14px; font-weight: 600; }
+.rc-status.ok { background: rgba(52,168,102,.14); color: #2e9a5a; }
+.rc-status.warn { background: rgba(217,158,46,.18); color: #a8741a; }
+.rc-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 12px 24px 4px; }
+.rc-stat { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; background: var(--subtle); }
+.rc-stat.warn { border-color: rgba(217,158,46,.55); }
+.rc-num { font-size: 22px; font-weight: 700; color: var(--ink); font-family: var(--mono); }
+.rc-lbl { font-size: 12px; color: var(--ink2); margin-top: 2px; }
+.rc-section { padding: 10px 24px 0; }
+.rc-h { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+.rc-list { margin: 0; padding-left: 18px; color: var(--ink2); font-size: 13px; }
+.rc-list li { margin: 3px 0; }
+.rc-path { font-size: 11.5px; color: var(--ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-details { margin-top: 6px; font-size: 13px; color: var(--ink2); }
+.rc-details summary { cursor: pointer; }
+.rc-table-wrap { max-height: 220px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
+.rc-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.rc-table th, .rc-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); color: var(--ink); }
+.rc-table th { position: sticky; top: 0; background: var(--subtle); color: var(--ink2); font-weight: 600; }
+.rc-old { color: var(--ink3); text-decoration: line-through; }
+.rc-more { margin: 6px 0 0; font-size: 12.5px; color: var(--ink3); }
 .am-actions { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 20px; }
 .am-btn-danger { background: var(--bad); color: #fff; border: 1px solid var(--bad); }
 .am-btn-danger:hover:not(:disabled) { background: var(--bad-ink); border-color: var(--bad-ink); }

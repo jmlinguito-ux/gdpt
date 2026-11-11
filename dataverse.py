@@ -312,6 +312,25 @@ class DataverseClient:
         self._token = result['access_token']
         self._token_expiry = time.time() + int(result.get('expires_in', 3600)) - 120
 
+    def get_scoped_token(self, scopes: list[str]) -> str:
+        """Access token for another resource (e.g. SharePoint via Graph) using the
+        same sign-in. Tries the cache first, then a browser sign-in. A missing
+        admin consent surfaces as a clear error."""
+        app = self._msal_app()
+        result = None
+        accounts = app.get_accounts()
+        if accounts:
+            result = app.acquire_token_silent(scopes, account=accounts[0])
+        if not result or 'access_token' not in result:
+            result = app.acquire_token_interactive(scopes, login_hint=(accounts[0].get('username') if accounts else None))
+        self._save_cache()
+        if not result or 'access_token' not in result:
+            err = (result or {}).get('error_description') or (result or {}).get('error') or 'Sign-in failed.'
+            raise RuntimeError(
+                'SharePoint access was not granted for this app (' + str(err).splitlines()[0][:160] + '). '
+                'Ask your admin to approve Microsoft Graph "Sites.Read.All", or choose a synced folder instead.')
+        return result['access_token']
+
     def _auth_header(self) -> dict:
         if not self._token or time.time() >= self._token_expiry:
             if not self.try_silent_token():
@@ -726,6 +745,7 @@ class DataverseClient:
             'NEGOTIATOR MATCH': ['NEGOTIATOR MATCH', 'SOURCER MATCH', 'SOURCING MATCH', 'cr63f_sourcermatch', 'cr63f_negotiatormatch'],
             'SOURCER MATCH': ['SOURCER MATCH', 'NEGOTIATOR MATCH', 'SOURCING MATCH', 'cr63f_sourcermatch', 'cr63f_negotiatormatch'],
             'BUILD': ['BUILD', 'cr63f_build'],
+            'PROJECT TAG': ['PROJECT TAG', 'PROJECTTAG', 'cr63f_projecttag'],
             'OFFER LETTER ACTION': ['OFFER LETTER ACTION', 'cr63f_offerletteraction'],
         }
 
@@ -1326,20 +1346,52 @@ class DataverseClient:
         area = self._resolve(ent, 'Area Index', 'Area-Index', 'AreaIndex')
         build = self._resolve(ent, 'Build', 'Build Name')
         ww = self._resolve(ent, 'Work Week', 'WorkWeek', 'WW', 'Work-Week')
-        select = [_select_name(c) for c in (area, build, ww) if c]
+        tag = self._resolve(ent, 'Project Tag', 'ProjectTag', 'cr63f_projecttag')
+        select = [_select_name(c) for c in (area, build, ww, tag) if c]
         if pk and pk not in select:
             select.append(pk)
-        rows = self._get_all(info['entitySetName'], select, formatted=_needs_formatting(area, build, ww))
+        rows = self._get_all(info['entitySetName'], select, formatted=_needs_formatting(area, build, ww, tag))
         out = []
         for r in rows:
             out.append({
                 'areaIndex': _formatted(r, area['logical']) if area else '',
                 'build': _formatted(r, build['logical']) if build else '',
                 'workWeek': _formatted(r, ww['logical']) if ww else '',
+                'projectTag': _formatted(r, tag['logical']) if tag else '',
                 '_record_id': _s(r.get(pk)),
                 '_entity_logical': ent,
             })
         return [r for r in out if r['areaIndex']]
+
+    _RECHECK_BUILD_COLUMNS = ('cr63f_build', 'cr63f_building', 'cr63f_buildingdescription', 'Build')
+
+    def get_recheck_rows(self, logical_name: str, year: str | None = None) -> dict | None:
+        """Stored rows of a productivity / records table, for the Build re-check.
+
+        Returns None when the table has no Area Index / Work Week / Build /
+        Project Tag column (nothing to re-check there). The Build column name
+        differs by table (cr63f_build, cr63f_building, cr63f_buildingdescription).
+        """
+        info = self.get_entity_info(logical_name)
+        pk = info['primaryIdAttribute']
+        area = self._resolve(logical_name, 'cr63f_areaindex', 'Area Index', 'Area-Index')
+        ww = self._resolve(logical_name, 'cr63f_workweek', 'Work Week')
+        build = self._resolve(logical_name, *self._RECHECK_BUILD_COLUMNS)
+        tag = self._resolve(logical_name, 'cr63f_projecttag', 'Project Tag')
+        if not (area and ww and build and tag and pk):
+            return None
+        select = [_select_name(c) for c in (area, ww, build, tag)] + [pk]
+        flt = None
+        if year and ww.get('type') in ('String', 'Memo'):
+            flt = f"startswith({_select_name(ww)},'{_escape_odata(str(year))}-')"
+        rows = self._get_all(info['entitySetName'], select,
+                             formatted=_needs_formatting(area, ww, build, tag), filter_str=flt)
+        return {
+            'logicalName': logical_name, 'buildColumn': build['logical'], 'tagColumn': tag['logical'],
+            'rows': [{'id': _s(r.get(pk)), 'areaIndex': _formatted(r, area['logical']),
+                      'workWeek': _formatted(r, ww['logical']), 'build': _formatted(r, build['logical']),
+                      'projectTag': _formatted(r, tag['logical'])} for r in rows],
+        }
 
     def sync_build_records(self, logical_name: str, inserts: list[dict], updates: list[dict],
                            progress_cb=None, max_retries: int = 2) -> dict:
@@ -1355,6 +1407,7 @@ class DataverseClient:
         area = self._resolve(ent, 'Area Index', 'Area-Index', 'AreaIndex')
         build = self._resolve(ent, 'Build', 'Build Name')
         ww = self._resolve(ent, 'Work Week', 'WorkWeek', 'WW', 'Work-Week')
+        tag = self._resolve(ent, 'Project Tag', 'ProjectTag', 'cr63f_projecttag')
         if not area or not build:
             raise RuntimeError(f"Could not resolve Area Index / Build columns on '{clean_table_title(ent)}'.")
 
@@ -1362,6 +1415,8 @@ class DataverseClient:
             p = {build['logical']: _s(rec.get('build'))}
             if with_area:
                 p[area['logical']] = _s(rec.get('areaIndex'))
+            if tag is not None and 'projectTag' in rec:
+                p[tag['logical']] = _s(rec.get('projectTag'))
             if ww is not None:
                 wk = pt_normalize_work_week(rec.get('workWeek'))
                 if wk is not None:
@@ -2184,13 +2239,15 @@ class DataverseClient:
             area = self._resolve(logical_name, 'Area Index', 'Area-Index', 'AreaIndex')
             build = self._resolve(logical_name, 'Build', 'Build Name')
             ww = self._resolve(logical_name, 'Work Week', 'WorkWeek', 'WW', 'Work-Week')
-            select = [_select_name(c) for c in (area, build, ww) if c]
+            tag = self._resolve(logical_name, 'Project Tag', 'ProjectTag', 'cr63f_projecttag')
+            select = [_select_name(c) for c in (area, build, ww, tag) if c]
             if pk and pk not in select:
                 select.append(pk)
-            rows = self._get_all(entity_set, select, formatted=_needs_formatting(area, build, ww))
+            rows = self._get_all(entity_set, select, formatted=_needs_formatting(area, build, ww, tag))
             out = [{'areaIndex': _formatted(r, area['logical']) if area else '',
                     'build': _formatted(r, build['logical']) if build else '',
                     'workWeek': _formatted(r, ww['logical']) if ww else '',
+                    'projectTag': _formatted(r, tag['logical']) if tag else '',
                     '_record_id': _s(r.get(pk)),
                     '_entity_logical': logical_name} for r in rows]
             return [r for r in out if r['areaIndex']]
