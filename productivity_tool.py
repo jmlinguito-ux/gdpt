@@ -2260,13 +2260,19 @@ def get_column_type_and_choices(col: str, mode: str, teams: list[dict],
         return {'type': 'choice', 'choices': labels}
 
     if col_upper == 'BUILD':
+        # Choices come from the values the Build table already uses for the loaded
+        # province, written the way BUILD is derived (Tarlac's OUTSIDE CONSO reads
+        # NON-CONSO), so a derived value is always an allowed choice.
         choices = []
+        seen = set()
         for b in build_rows:
-            bv = (b.get('build', '') or '').strip()
-            if bv and bv.upper() != 'UNASSIGNED' and bv not in choices:
+            bv = _normalize_build_label(b.get('build', '') or '')
+            if bv and bv.upper() != 'UNASSIGNED' and bv.upper() not in seen:
+                seen.add(bv.upper())
                 choices.append(bv)
-        for std in ['BUILD-1', 'BUILD-2', 'BUILD-3', 'BALANCE', 'NO DATA']:
-            if std not in choices:
+        for std in ['CONSO', 'NON-CONSO', 'BUILD-1', 'BUILD-2', 'BUILD-3', 'BALANCE', 'NO DATA']:
+            if std not in seen:
+                seen.add(std)
                 choices.append(std)
         return {'type': 'choice', 'choices': choices}
 
