@@ -2465,7 +2465,7 @@ function attachHeaderResizers(tableEl, tableKey, headers, onResizeDone) {
         th.style.minWidth = `${newWidth}px`;
         th.style.maxWidth = `${newWidth}px`;
 
-        const rows = tableEl.querySelectorAll('tbody tr');
+        const rows = tableEl.querySelectorAll('tbody tr:not(.calc-issue-note)');
         rows.forEach(r => {
           const td = r.children[colIdx];
           if (td) {
@@ -3938,7 +3938,9 @@ function renderProductivityBody() {
       </button>
     `;
     tr.appendChild(tdAct);
+    if (calculationErrors) markCalculationIssueCells(tr, columns || labels || [], calculationErrors);
     frag.appendChild(tr);
+    if (calculationErrors) frag.appendChild(calculationIssueNoteRow(tr.children.length, calculationErrors));
   }
 
   tbody.appendChild(frag);
@@ -4209,6 +4211,57 @@ async function previewDataverseTable(logicalName) {
 
 // --- helpers ----------------------------------------------------------------
 function isNumeric(v) { return v !== '' && !isNaN(v); }
+// Calculation issues (CHECKER / POINTS / LO re-checks) belong to the whole row,
+// so they used to show only as a row tooltip. Point at the columns each issue is
+// about and print the reason under the row, so the user can see what to fix.
+function calculationIssueColumns(message, columns) {
+  const msg = String(message || '').toUpperCase();
+  const keys = columns.map(c => String(c || '').trim().toUpperCase());
+  const want = new Set();
+  const add = test => keys.forEach((k, i) => { if (test(k, columns[i])) want.add(i); });
+  const isArea = k => k === 'AREA INDEX' || k === 'AREA-INDEX';
+  const isDate = (k, c) => isDateColumn(c);
+  const isMatched = (k, c) => isMatchedNegotiatorColumn(c);
+  if (msg.startsWith('POINTS:')) {
+    add(k => k === 'POINTS');
+    if (msg.includes('CHECKER') || msg.includes('IDENTITY')) { add(k => k === 'CHECKER'); add(isArea); add(isDate); }
+    if (msg.includes('USABILITY')) add(k => k === 'DATA USABILITY');
+  } else if (msg.startsWith('LO:')) {
+    add(k => k === 'LO' || k.startsWith('LO '));
+    if (msg.includes('AREA INDEX') || msg.includes('PROPERTY')) add(isArea);
+    if (msg.includes('DATE')) add(isDate);
+    if (msg.includes('CHECKER')) add(k => k === 'CHECKER');
+  } else {
+    if (msg.includes('EMPLOYEE') || msg.includes('SOURCE RECORD')) { add(isMatched); add(isArea); add(isDate); }
+    if (msg.includes('PROPERTY') || msg.includes('DATE')) { add(isArea); add(isDate); }
+    if (msg.includes('CLASSIFICATION') || msg.includes('PEER') || msg.includes('HISTOR') || msg.includes('CHECKER')) add(k => k === 'CHECKER');
+    if (msg.includes('USABILITY')) add(k => k === 'DATA USABILITY');
+    if (!want.size) add(k => k === 'CHECKER');
+  }
+  return [...want];
+}
+
+function markCalculationIssueCells(tr, columns, messages) {
+  for (const message of messages) {
+    for (const idx of calculationIssueColumns(message, columns)) {
+      const td = tr.children[idx];
+      if (!td) continue;
+      td.classList.add('cell-invalid', 'cell-calc-issue');
+      td.title = td.title ? `${td.title}\n${message}` : message;
+    }
+  }
+}
+
+function calculationIssueNoteRow(span, messages) {
+  const note = document.createElement('tr');
+  note.className = 'calc-issue-note';
+  const td = document.createElement('td');
+  td.colSpan = span;
+  td.innerHTML = `<div class="calc-issue-text"><span class="calc-issue-tag">Issue</span>${messages.map(m => escapeHtml(m)).join('<span class="calc-issue-sep">·</span>')}</div>`;
+  note.appendChild(td);
+  return note;
+}
+
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 // --- wiring -----------------------------------------------------------------
@@ -4493,7 +4546,7 @@ function wire() {
           const tblId = (mode === 'review') ? 'reviewTable' : 'prodTable';
           const tableEl = document.getElementById(tblId);
           if (tableEl) {
-            const tr = tableEl.querySelector(`tbody tr:nth-child(${err.row})`);
+            const tr = tableEl.querySelectorAll('tbody tr:not(.calc-issue-note)')[err.row - 1];
             if (tr) tr.classList.add('publish-error-row');
           }
         });
@@ -5200,7 +5253,7 @@ function invalidateGridCache(tableId) {
 function gridCellsMatrix(tableEl) {
   const id = tableEl.id;
   if (GRID_CELL_CACHE[id]) return GRID_CELL_CACHE[id];
-  const m = Array.from(tableEl.querySelectorAll('tbody > tr')).map(tr =>
+  const m = Array.from(tableEl.querySelectorAll('tbody > tr:not(.calc-issue-note)')).map(tr =>
     Array.from(tr.querySelectorAll('td')).filter(td => td.dataset.colKey != null));
   GRID_CELL_CACHE[id] = m;
   return m;
@@ -5209,7 +5262,7 @@ function gridCellsMatrix(tableEl) {
 function gridPosOf(tbody, td) {
   const tr = td.closest('tr');
   if (!tr) return null;
-  const r = Array.prototype.indexOf.call(tbody.children, tr);
+  const r = Array.from(tbody.children).filter(x => !x.classList.contains('calc-issue-note')).indexOf(tr);
   if (r < 0) return null;
   const cells = Array.from(tr.querySelectorAll('td')).filter(x => x.dataset.colKey != null);
   const c = cells.indexOf(td);
