@@ -3569,6 +3569,20 @@ function renderProductivity(table) {
 
 
 
+// An edit recalculates other rows (shared points, source checks). The cell
+// handlers only patch the edited row, so pull the fresh table state and redraw
+// only when something else on the grid actually changed.
+function syncProductivityAfterEdit(res, editedIndex) {
+  const fresh = res && res.table;
+  if (!fresh || !prodTable || !Array.isArray(fresh.rows)) return;
+  const sameRows = fresh.rows.length === prodTable.rows.length && fresh.rows.every((r, i) =>
+    i === editedIndex || JSON.stringify(r) === JSON.stringify(prodTable.rows[i]));
+  const sameIssues = JSON.stringify(fresh.calculationErrors || {}) === JSON.stringify(prodTable.calculationErrors || {});
+  prodTable.rows = fresh.rows;
+  prodTable.calculationErrors = fresh.calculationErrors || {};
+  if (!sameRows || !sameIssues) setTimeout(() => { renderProductivityBody(); updateProdValidationState(); }, 0);
+}
+
 function renderProductivityBody() {
   if (!prodTable || !prodTable.rows) return;
   const tbody = $('prodTable').querySelector('tbody');
@@ -3726,6 +3740,7 @@ function renderProductivityBody() {
             const res = await call('update_productivity_cell', rowIndex, colKey, newVal);
             if (res && res.ok !== false) {
               toast(`Updated ${colKey}.`);
+            syncProductivityAfterEdit(res, rowIndex);
               if (res.row) {
                 prodTable.rows[rowIndex] = res.row;
                 const curSourceVal = (sourceColIdx >= 0 && res.row[sourceColIdx] !== undefined) ? String(res.row[sourceColIdx]).trim() : sourceNegVal;
@@ -3811,6 +3826,7 @@ function renderProductivityBody() {
           const res = await call('update_productivity_cell', rowIndex, colKey, rawVal);
           if (res && res.ok !== false) {
             toast(`Updated ${colKey}.`);
+            syncProductivityAfterEdit(res, rowIndex);
             if (res.row) {
               prodTable.rows[rowIndex] = res.row;
               const curSourceVal = (sourceColIdx >= 0 && res.row[sourceColIdx] !== undefined) ? String(res.row[sourceColIdx]).trim() : sourceNegVal;
@@ -3883,6 +3899,7 @@ function renderProductivityBody() {
           const res = await call('update_productivity_cell', rowIndex, colKey, rawVal);
           if (res && res.ok !== false) {
             toast(`Updated ${colKey}.`);
+            syncProductivityAfterEdit(res, rowIndex);
             if (res.row) {
               prodTable.rows[rowIndex] = res.row;
               const curSourceVal = (sourceColIdx >= 0 && res.row[sourceColIdx] !== undefined) ? String(res.row[sourceColIdx]).trim() : sourceNegVal;
