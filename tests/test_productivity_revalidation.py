@@ -59,3 +59,21 @@ class RevalidationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CorrectedNegotiatorTests(unittest.TestCase):
+    def test_matched_name_may_differ_from_typed_name_when_row_came_from_record(self):
+        record = dict(id='source:0', number=1, area='TAY-845', date='11/12/2026',
+                      name='LEONARDO AMORAO/JHONAS UJAR', classification='AGRICULTURAL',
+                      usability='VALID', link='x')
+        corrected = dict(id='0', area='TAY-845', date='11/12/2026', matched='LEANDRO AMURAO',
+                         source_id='source:0', link='x')
+        wanted, errors, _ = calculate([corrected], [record])
+        self.assertFalse(errors)
+        self.assertEqual(wanted['0']['method'], 'formula-id')
+
+    def test_without_source_id_the_employee_must_still_be_on_the_record(self):
+        record = dict(id='source:0', number=1, area='TAY-845', date='11/12/2026',
+                      name='LEONARDO AMORAO', classification='AGRICULTURAL', usability='VALID', link='x')
+        row = dict(id='0', area='TAY-845', date='11/12/2026', matched='LEANDRO AMURAO', link='y')
+        self.assertEqual(calculate([row], [record])[1][0]['reason'], 'No verified source record')

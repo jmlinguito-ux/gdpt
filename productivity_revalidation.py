@@ -57,7 +57,13 @@ def calculate(productivity, records, team_names=(), mode='negotiation'):
         if not reason:
             exact = ([r for r in visits[(area, day)] if r['id'] == p['source_id']]
                      if p.get('source_id') else links.get(clean(p.get('link')), []))
-            exact = [r for r in exact if (r['area'], r['day']) == (area, day) and employee in r['names']]
+            # A row generated from a specific uploaded record is verified by that
+            # record. MATCHED NEGOTIATOR is the corrected name, so it need not
+            # equal the typed NEGOTIATOR NAME. A shared formula link still has
+            # to agree on the employee, since many people can share one link.
+            by_record = bool(p.get('source_id'))
+            exact = [r for r in exact if (r['area'], r['day']) == (area, day)
+                     and (by_record or employee in r['names'])]
             if len(exact) == 1:
                 candidates, method = exact, 'formula-id'
             else:
