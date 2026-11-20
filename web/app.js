@@ -4249,8 +4249,15 @@ function calculationIssueColumns(message, columns) {
     if (msg.includes('DATE')) add(isDate);
     if (msg.includes('CHECKER')) add(k => k === 'CHECKER');
   } else {
-    if (msg.includes('EMPLOYEE') || msg.includes('SOURCE RECORD')) { add(isMatched); add(isArea); add(isDate); }
-    if (msg.includes('PROPERTY') || msg.includes('DATE')) { add(isArea); add(isDate); }
+    const named = msg.includes('MATCHED NEGOTIATOR NAME') || msg.includes('AREA INDEX IS') || msg.includes('NEGO DATE IS');
+    if (named) {
+      if (msg.includes('MATCHED NEGOTIATOR NAME')) add(isMatched);
+      if (msg.includes('AREA INDEX IS')) add(isArea);
+      if (msg.includes('NEGO DATE IS')) add(isDate);
+    } else {
+      if (msg.includes('EMPLOYEE') || msg.includes('SOURCE RECORD')) { add(isMatched); add(isArea); add(isDate); }
+      if (msg.includes('PROPERTY') || msg.includes('DATE')) { add(isArea); add(isDate); }
+    }
     if (msg.includes('CLASSIFICATION') || msg.includes('PEER') || msg.includes('HISTOR') || msg.includes('CHECKER')) add(k => k === 'CHECKER');
     if (msg.includes('USABILITY')) add(k => k === 'DATA USABILITY');
     if (!want.size) add(k => k === 'CHECKER');

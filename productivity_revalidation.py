@@ -51,8 +51,18 @@ def calculate(productivity, records, team_names=(), mode='negotiation'):
     for p in productivity:
         area, day, employee = clean(p.get('area')), date_key(p.get('date')), clean(p.get('matched'))
         reason = ''
-        if not area or not day or not employee or '/' in employee:
-            reason = 'Missing property/date/single matched employee'
+        # Name the one field that fails so the workspace highlights only that cell.
+        missing = []
+        if not area:
+            missing.append('AREA INDEX is blank')
+        if not day:
+            missing.append('NEGO DATE is blank or not a valid date')
+        if not employee:
+            missing.append('MATCHED NEGOTIATOR NAME is blank')
+        elif '/' in employee:
+            missing.append('MATCHED NEGOTIATOR NAME must be one person, not several')
+        if missing:
+            reason = '; '.join(missing)
         candidates = []
         if not reason:
             exact = ([r for r in visits[(area, day)] if r['id'] == p['source_id']]

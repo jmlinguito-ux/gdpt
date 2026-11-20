@@ -77,3 +77,16 @@ class CorrectedNegotiatorTests(unittest.TestCase):
                       name='LEONARDO AMORAO', classification='AGRICULTURAL', usability='VALID', link='x')
         row = dict(id='0', area='TAY-845', date='11/12/2026', matched='LEANDRO AMURAO', link='y')
         self.assertEqual(calculate([row], [record])[1][0]['reason'], 'No verified source record')
+
+
+class NamedFieldReasonTests(unittest.TestCase):
+    def reason(self, **over):
+        record = source(1)
+        row = dict(prod('a', record), **over)
+        return calculate([row], [record])[1][0]['reason']
+
+    def test_reason_names_the_failing_field(self):
+        self.assertEqual(self.reason(matched=''), 'MATCHED NEGOTIATOR NAME is blank')
+        self.assertEqual(self.reason(area=''), 'AREA INDEX is blank')
+        self.assertEqual(self.reason(date=''), 'NEGO DATE is blank or not a valid date')
+        self.assertIn('one person', self.reason(matched='JUAN / MARIA'))
