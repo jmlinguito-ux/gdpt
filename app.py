@@ -2458,10 +2458,11 @@ class Api:
     # -- publish helpers ---------------------------------------------------
     def _row_keys(self, row: dict):
         """The duplicate identity of a row (see pt.publish_duplicate_key):
-        AREA INDEX + DATE + LO + DATA USABILITY + CHECKER + raw negotiator/sourcer.
+        AREA INDEX + DATE + LO + raw negotiator/sourcer.
 
-        This mirrors the Dataverse NEGO ID / SOURCING ID formula plus the person, so
-        two different reports (different LO / checker) on the same day are both kept,
+        CHECKER and DATA USABILITY are not part of it: they are re-calculated on
+        every Generate run and would make an already-published report look new.
+        Two different reports (different LO) on the same day are both kept,
         while the same report published twice is caught even if its MATCHED name was
         blank or changed between runs. Kept symmetric with dataverse._existing_key_index.
         Returns (key, label).
@@ -2488,8 +2489,8 @@ class Api:
     def _partition_rows(self, rows, existing_keys, override=False, key_id_map=None, stage='review'):
         """Split rows into (writable, duplicates, updatable) and collect hard errors.
 
-        - A duplicate is a row whose key (AREA + DATE + LO + DATA USABILITY +
-          CHECKER + raw negotiator/sourcer) already exists in Dataverse, or
+        - A duplicate is a row whose key (AREA + DATE + LO + raw
+          negotiator/sourcer) already exists in Dataverse, or
           repeats an earlier row in this same batch.
         - When `override` is on, a duplicate that matches an EXISTING Dataverse
           record (any of the three keys) becomes 'updatable' — it will PATCH that
@@ -2513,7 +2514,7 @@ class Api:
         for idx, row in enumerate(rows):
             row_num = idx + 1
             area_key, label = self._row_keys(row)
-            # Duplicate identity: AREA + DATE + LO + DATA USABILITY + CHECKER + raw name.
+            # Duplicate identity: AREA + DATE + LO + raw name (not CHECKER / DATA USABILITY).
             # A repeat of an earlier row in this SAME batch is skipped (it used to be
             # published, creating duplicate rows in Dataverse).
             in_batch_repeat = bool(area_key and area_key in seen_batch_keys)

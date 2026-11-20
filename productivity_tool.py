@@ -619,10 +619,18 @@ def publish_duplicate_key(area: str, date_value: str, lo: str, usability: str,
                           checker: str, name: str) -> str:
     """Duplicate identity used when publishing records / productivity.
 
-    Same parts as the Dataverse NEGO ID / SOURCING ID formula
-    (AREA INDEX - DATE - LO - DATA USABILITY - CHECKER) plus the RAW negotiator /
-    sourcer name. The matched name is deliberately NOT used: it can be blank or
-    change between runs, which made the same row look new and get published twice.
+    AREA INDEX + DATE + LO + the RAW negotiator / sourcer name - only values that
+    come from the field report and stay the same for the same report.
+
+    Calculated values are deliberately NOT used, because they can change each
+    time Generate runs and would make an already-published report look new
+    (it would then be published a second time):
+      - MATCHED name: can be blank or change between runs.
+      - CHECKER and DATA USABILITY: re-worked out from history on every run
+        (e.g. FIRST CONTACT -> 1ST DUPLICATE, VALID -> INVALID).
+    `usability` and `checker` are still accepted so callers stay unchanged, but
+    they are ignored. With Override on, a matched record is updated in place, so
+    a changed CHECKER / DATA USABILITY is written to the existing record.
     Returns '' when AREA INDEX or DATE is missing (no reliable identity).
     """
     def clean(v):
@@ -634,7 +642,7 @@ def publish_duplicate_key(area: str, date_value: str, lo: str, usability: str,
     if is_excel_date_serial(d):
         d = excel_serial_to_date_str(d)
     d = clean(format_date_to_mm_dd_yyyy(d) or d)
-    return '___'.join([a, d, clean(lo), clean(usability), clean(checker), clean(name)])
+    return '___'.join([a, d, clean(lo), clean(name)])
 
 
 def get_lo_occurrence_name(row: dict) -> str:
