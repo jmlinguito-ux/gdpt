@@ -30,6 +30,7 @@ def refresh(rows, sources=(), history=(), teams=(), mode='negotiation', history_
             'lo': row.get('LO'), 'usability': row.get('DATA USABILITY'),
             'source_id': f"source:{row['_source_row_index']}" if '_source_row_index' in row else None})
     issues = []
+    checker_before = [str(row.get('CHECKER') or '') for row in rows]
     if sources and history_ready:
         flags, problems, _ = revalidate(canonical, source_rows, pt.team_name_set(teams), mode)
         issues.extend(dict(p, scope='SOURCE') for p in problems)
@@ -54,4 +55,33 @@ def refresh(rows, sources=(), history=(), teams=(), mode='negotiation', history_
         row['UNIQUE ID'] = f"{row.get('AREA INDEX', '')}{row.get('NEGO DATE', '')}{row.get('CHECKER', '')}"
         row.pop('_base_lo_day', None)
         row.pop('_base_lo_ww', None)
+    refresh_distinctions(rows, checker_before, history, mode)
     return issues
+
+
+def _is_duplicate(checker):
+    return 'DUPLICATE' in str(checker or '').upper()
+
+
+def refresh_distinctions(rows, checker_before, history=(), mode='negotiation'):
+    """NEGO DISTINCTION reads DUPLICATE straight from CHECKER. When revalidation
+    moves a row's CHECKER into or out of a duplicate, work its distinction out
+    again so the two never disagree (e.g. FIRST CONTACT next to DUPLICATE)."""
+    changed = [i for i, row in enumerate(rows)
+               if 'NEGO DISTINCTION' in row and _is_duplicate(checker_before[i]) != _is_duplicate(row.get('CHECKER'))]
+    if not changed:
+        return
+    def key(area, ww):
+        return str(area or '').strip().lower(), str(ww or '')
+    peers = defaultdict(list)
+    for row in rows:
+        peers[key(row.get('AREA INDEX'), row.get('WORK WEEK'))].append(row)
+    existing = defaultdict(list)
+    for rec in history or ():
+        area = rec.get('aREAINDEX') or rec.get('AREA-INDEX') or rec.get('AREA INDEX') or ''
+        day = pt.get_normalized_record_date(rec)
+        existing[key(area, pt.canonical_work_week(rec.get('WORK WEEK'), day))].append(rec)
+    for i in changed:
+        row = rows[i]
+        k = key(row.get('AREA INDEX'), row.get('WORK WEEK'))
+        row['NEGO DISTINCTION'] = pt.get_nego_distinction(row, peers[k], existing.get(k, []), mode)
